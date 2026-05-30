@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod ai_commands;
+pub mod app_commands;
 pub mod apps;
 pub mod bookmarks;
 pub mod calc;
@@ -20,6 +21,7 @@ pub mod window;
 
 pub use ai::AiProvider;
 pub use ai_commands::AiCommandsProvider;
+pub use app_commands::AppCommandsProvider;
 pub use apps::AppsProvider;
 pub use bookmarks::BookmarksProvider;
 pub use calc::CalcProvider;

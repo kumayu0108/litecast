@@ -23,6 +23,25 @@ web_search_url = "https://www.google.com/search?q={}"
 # kind = "open"                       # "open" (file/url/app) or "shell"
 # target = "https://github.com/{}"
 
+# App commands: `@keyword`-triggered actions that take a free-text argument.
+# Type `@` to see the available shortcuts, fuzzy-match the keyword, and press
+# Tab to accept it; then type an argument and press Enter to run. Built-ins ship
+# for `@term` (run in Terminal.app), `@finder` (open a path in Finder), and
+# `@safari` (open a URL / search the web). Define your own below. `{query}` (or
+# `{arg}`) is replaced with the text typed after the keyword. A user entry that
+# reuses a built-in keyword overrides it.
+#
+# kind = "terminal"    -> run {query} in Terminal.app
+# kind = "shell"       -> run {query} via `sh -c`
+# kind = "applescript" -> run the template via `osascript -e`
+# kind = "open"        -> open the template (file/url/app) via `open`
+#
+# [[app_commands]]
+# keyword = "ed"
+# name = "Edit in editor"
+# kind = "shell"
+# template = "code {query}"
+
 # Quicklinks: parameterized URLs opened in your browser. Type the keyword plus
 # an argument (e.g. "ghr rust-lang/rust"); {query} is URL-encoded and
 # substituted. Without an argument, the link is fuzzy-matched by name (or by any
@@ -116,6 +135,7 @@ enabled = false
 pub struct Config {
     pub web_search_url: String,
     pub commands: Vec<CommandConfig>,
+    pub app_commands: Vec<AppCommandConfig>,
     pub quicklinks: Vec<QuicklinkConfig>,
     pub snippets: SnippetsConfig,
     pub conversion: ConversionConfig,
@@ -131,6 +151,7 @@ impl Default for Config {
         Self {
             web_search_url: "https://www.google.com/search?q={}".to_string(),
             commands: Vec::new(),
+            app_commands: Vec::new(),
             quicklinks: Vec::new(),
             snippets: SnippetsConfig::default(),
             conversion: ConversionConfig::default(),
@@ -245,6 +266,29 @@ pub struct SnippetConfig {
     pub paste: bool,
 }
 
+/// An `@keyword`-triggered app command: after the `@keyword` is typed (and
+/// optionally Tab-accepted), the free text after it becomes the `{query}` /
+/// `{arg}` argument substituted into a template and run. Built-ins ship for
+/// `@term`, `@finder`, and `@safari`; users can define their own here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppCommandConfig {
+    /// The `@`-prefixed trigger (stored WITHOUT the `@`, e.g. `term`).
+    pub keyword: String,
+    /// Display name shown in the autocomplete + result row.
+    #[serde(default)]
+    pub name: String,
+    /// Optional one-line description shown under the name.
+    #[serde(default)]
+    pub subtitle: String,
+    /// How the template is run: "terminal" (run in Terminal.app), "shell"
+    /// (`sh -c`), "applescript" (`osascript -e`), or "open" (file/url/app).
+    pub kind: String,
+    /// Command/URL/script template; `{query}` (or `{arg}`) is replaced with the
+    /// text typed after the keyword.
+    #[serde(default)]
+    pub template: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandConfig {
     pub name: String,
@@ -304,6 +348,58 @@ impl Default for UiConfig {
             critters: true,
         }
     }
+}
+
+impl AppCommandConfig {
+    fn builtin(keyword: &str, name: &str, subtitle: &str, kind: &str) -> Self {
+        Self {
+            keyword: keyword.to_string(),
+            name: name.to_string(),
+            subtitle: subtitle.to_string(),
+            kind: kind.to_string(),
+            template: String::new(),
+        }
+    }
+}
+
+/// The built-in app commands shipped out of the box (no AI dependency). User
+/// `[[app_commands]]` entries are appended after these; a user entry with the
+/// same keyword overrides the built-in.
+pub fn builtin_app_commands() -> Vec<AppCommandConfig> {
+    vec![
+        AppCommandConfig::builtin(
+            "term",
+            "Terminal",
+            "Run the argument in Terminal.app",
+            "terminal",
+        ),
+        AppCommandConfig::builtin(
+            "finder",
+            "Finder",
+            "Open a path or folder in Finder (defaults to home)",
+            "finder",
+        ),
+        AppCommandConfig::builtin(
+            "safari",
+            "Open in browser",
+            "Open a URL (or search the web) in your default browser",
+            "safari",
+        ),
+    ]
+}
+
+/// Built-ins merged with user `[[app_commands]]`. A user entry sharing a
+/// built-in keyword replaces it.
+pub fn merged_app_commands(user: &[AppCommandConfig]) -> Vec<AppCommandConfig> {
+    let mut merged = builtin_app_commands();
+    for entry in user {
+        if let Some(existing) = merged.iter_mut().find(|c| c.keyword == entry.keyword) {
+            *existing = entry.clone();
+        } else {
+            merged.push(entry.clone());
+        }
+    }
+    merged
 }
 
 /// Load the config from disk, writing a commented default on first run.
