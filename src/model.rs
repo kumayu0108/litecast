@@ -7,6 +7,9 @@ pub enum Action {
     RunShell(String),
     /// Copy text to the clipboard.
     CopyText(String),
+    /// Expand placeholders in a snippet template, then copy it to the clipboard
+    /// so the user can paste it (paste-on-Enter; no Accessibility required).
+    Paste(String),
     /// Send a prompt (optionally about a screenshot) to the AI backend. Handled
     /// specially by the UI (async, keeps the panel open), not via `execute`.
     AskAi { prompt: String, image: Option<String> },
@@ -91,6 +94,10 @@ impl Action {
                 crate::clipboard::set_clipboard(text);
                 true
             }
+            Action::Paste(template) => {
+                crate::clipboard::set_clipboard(&expand_placeholders(template));
+                true
+            }
             Action::SetApiKey { provider, key } => {
                 crate::secrets::set_api_key(provider, key);
                 true
@@ -103,4 +110,31 @@ impl Action {
             Action::None => false,
         }
     }
+}
+
+/// Expand snippet placeholders at activation time: `{date}`, `{time}`,
+/// `{clipboard}`, and `{cursor}` (removed). Subprocesses run only when the
+/// matching placeholder is present, and only on Enter (never per keystroke).
+fn expand_placeholders(template: &str) -> String {
+    let mut text = template.to_string();
+    if text.contains("{date}") {
+        text = text.replace("{date}", &shell_capture("date +%Y-%m-%d"));
+    }
+    if text.contains("{time}") {
+        text = text.replace("{time}", &shell_capture("date +%H:%M"));
+    }
+    if text.contains("{clipboard}") {
+        text = text.replace("{clipboard}", &shell_capture("pbpaste"));
+    }
+    text.replace("{cursor}", "")
+}
+
+fn shell_capture(cmd: &str) -> String {
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+        .unwrap_or_default()
 }

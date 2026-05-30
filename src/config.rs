@@ -19,6 +19,17 @@ web_search_url = "https://www.google.com/search?q={}"
 # kind = "open"                       # "open" (file/url/app) or "shell"
 # target = "https://github.com/{}"
 
+# Reusable text snippets. List them with the "snip" keyword (or "snip <filter>"),
+# or surface one directly via its own keyword. Enter copies the expanded text to
+# the clipboard so you can paste it. Supported placeholders in `text`:
+# {date} {time} {clipboard} {cursor}.
+#
+# [[snippets.entries]]
+# keyword = "addr"
+# name = "Home address"
+# text = "1 Main St, Springfield"
+# paste = false
+
 [ai]
 # Backend: "anthropic", "openai", or "cursor" (OpenAI-compatible endpoint).
 provider = "anthropic"
@@ -36,6 +47,7 @@ critters = true
 pub struct Config {
     pub web_search_url: String,
     pub commands: Vec<CommandConfig>,
+    pub snippets: SnippetsConfig,
     pub ai: AiConfig,
     pub ui: UiConfig,
 }
@@ -45,10 +57,33 @@ impl Default for Config {
         Self {
             web_search_url: "https://www.google.com/search?q={}".to_string(),
             commands: Vec::new(),
+            snippets: SnippetsConfig::default(),
             ai: AiConfig::default(),
             ui: UiConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SnippetsConfig {
+    pub entries: Vec<SnippetConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnippetConfig {
+    /// Optional keyword that surfaces this snippet directly.
+    #[serde(default)]
+    pub keyword: String,
+    /// Display name; falls back to the keyword when empty.
+    #[serde(default)]
+    pub name: String,
+    /// Snippet body. Supports `{date}`, `{time}`, `{clipboard}` placeholders.
+    pub text: String,
+    /// When true, the entry uses the paste-on-Enter action (copies to the
+    /// clipboard). Currently identical to a plain copy (no synthetic paste).
+    #[serde(default)]
+    pub paste: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
