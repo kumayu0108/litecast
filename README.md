@@ -181,4 +181,4 @@ and notarization are planned for a later milestone.)
 
 ## License
 
-MIT
+Licensed under the MIT License. See the [LICENSE](LICENSE) file for the full text.
