@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod apps;
 pub mod calc;
 pub mod clipboard;
@@ -6,6 +7,7 @@ pub mod files;
 pub mod plugins;
 pub mod websearch;
 
+pub use ai::AiProvider;
 pub use apps::AppsProvider;
 pub use calc::CalcProvider;
 pub use clipboard::ClipboardProvider;

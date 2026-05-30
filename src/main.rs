@@ -1,9 +1,11 @@
+mod ai;
 mod clipboard;
 mod config;
 mod engine;
 mod model;
 mod paths;
 mod providers;
+mod secrets;
 
 use std::cell::{Cell, RefCell};
 use std::sync::{mpsc, Arc, Mutex};
@@ -28,15 +30,16 @@ use objc2_foundation::{
 };
 
 use clipboard::History;
-use config::Config;
+use config::{AiConfig, Config};
 use engine::Engine;
-use model::Item;
+use model::{Action, Item};
 use providers::{
-    AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider, PluginProvider,
-    WebSearchProvider,
+    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider,
+    PluginProvider, WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
+type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 680.0;
 const SEARCH_AREA_H: f64 = 64.0;
@@ -82,6 +85,12 @@ struct Ivars {
     clip_history: History,
     /// Last observed pasteboard change count.
     last_change: Cell<isize>,
+    /// AI backend configuration (provider/model/endpoint).
+    ai_config: AiConfig,
+    /// Latest AI answer awaiting application on the main thread.
+    ai_pending: AiPending,
+    /// Monotonic AI request id; stale answers are discarded.
+    ai_generation: Cell<u64>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -125,11 +134,17 @@ define_class!(
             self.apply_pending_results();
         }
 
+        // Invoked on the main thread when an AI answer is ready.
+        #[unsafe(method(applyAiAnswer))]
+        fn apply_ai_answer(&self) {
+            self.apply_pending_ai_answer();
+        }
+
         // Repeating timer: record clipboard changes into history. Only does work
         // when the integer change count differs, so it is effectively free.
         #[unsafe(method(pollClipboard:))]
         fn poll_clipboard(&self, _timer: &AnyObject) {
-            let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+            let pasteboard = NSPasteboard::generalPasteboard();
             let count = pasteboard.changeCount();
             let ivars = self.ivars();
             if count == ivars.last_change.get() {
@@ -297,9 +312,77 @@ impl AppDelegate {
                 None => return,
             }
         };
+        // AI requests run asynchronously and keep the panel open.
+        if let Action::AskAi { prompt, image } = action {
+            self.start_ai(prompt, image);
+            return;
+        }
         if action.execute() {
             self.hide_and_reset();
         }
+    }
+
+    /// Kick off an AI request on a background thread and show a loading state.
+    fn start_ai(&self, prompt: String, image: Option<String>) {
+        let ivars = self.ivars();
+        let generation = ivars.ai_generation.get().wrapping_add(1);
+        ivars.ai_generation.set(generation);
+
+        // Show a loading row immediately.
+        *ivars.results.borrow_mut() = vec![Item::new(
+            "Thinking...",
+            "Contacting the AI backend",
+            "AI",
+            0,
+            Action::None,
+        )];
+        ivars.table.reloadData();
+        self.layout(1);
+
+        let config = ivars.ai_config.clone();
+        let pending = ivars.ai_pending.clone();
+        let delegate_addr = self as *const AppDelegate as usize;
+        std::thread::spawn(move || {
+            let result = ai::ask(&config, &prompt, image.as_deref());
+            if let Ok(mut slot) = pending.lock() {
+                *slot = Some((generation, result));
+            }
+            let ptr = delegate_addr as *const AnyObject;
+            unsafe {
+                let obj: &AnyObject = &*ptr;
+                let _: () = msg_send![
+                    obj,
+                    performSelectorOnMainThread: sel!(applyAiAnswer),
+                    withObject: std::ptr::null::<AnyObject>(),
+                    waitUntilDone: false,
+                ];
+            }
+        });
+    }
+
+    fn apply_pending_ai_answer(&self) {
+        let ivars = self.ivars();
+        let taken = ivars.ai_pending.lock().ok().and_then(|mut slot| slot.take());
+        let Some((generation, result)) = taken else {
+            return;
+        };
+        if generation != ivars.ai_generation.get() {
+            return; // Stale answer.
+        }
+        let items = match result {
+            Ok(answer) => answer_to_items(&answer),
+            Err(err) => vec![Item::new(
+                "AI error",
+                err,
+                "AI",
+                0,
+                Action::None,
+            )],
+        };
+        let n = items.len();
+        *ivars.results.borrow_mut() = items;
+        ivars.table.reloadData();
+        self.layout(n);
     }
 
     /// Resize the panel to fit `rows` results and reposition the subviews.
@@ -342,6 +425,46 @@ impl AppDelegate {
         ivars.scroll.setFrame(scroll_frame);
         ivars.scroll.setHidden(visible_rows == 0);
     }
+}
+
+/// Turn an AI answer into wrapped result rows. Each row copies the full answer
+/// on Enter, so a multi-line reply is readable and copyable.
+fn answer_to_items(answer: &str) -> Vec<Item> {
+    const WRAP: usize = 88;
+    let full = answer.trim().to_string();
+    let mut lines: Vec<String> = Vec::new();
+    for raw_line in full.lines() {
+        if raw_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in raw_line.split_whitespace() {
+            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > WRAP {
+                lines.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    if lines.is_empty() {
+        lines.push("(empty response)".to_string());
+    }
+
+    lines
+        .into_iter()
+        .take(MAX_VISIBLE_ROWS)
+        .enumerate()
+        .map(|(i, line)| {
+            let subtitle = if i == 0 { "Enter to copy full answer" } else { "" };
+            Item::new(line, subtitle, "AI", 0, Action::CopyText(full.clone()))
+        })
+        .collect()
 }
 
 fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSTextField> {
@@ -449,6 +572,7 @@ fn build_panel(
 
 fn build_engine(history: History, config: &Config) -> Engine {
     let mut engine = Engine::new();
+    engine.add(Box::new(AiProvider::new(config.ai.clone())));
     engine.add(Box::new(CalcProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
@@ -487,6 +611,9 @@ fn main() {
         pending: pending.clone(),
         clip_history: history.clone(),
         last_change: Cell::new(-1),
+        ai_config: config.ai.clone(),
+        ai_pending: Arc::new(Mutex::new(None)),
+        ai_generation: Cell::new(0),
         _hotkey_manager: manager,
     };
 
