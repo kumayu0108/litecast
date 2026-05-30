@@ -20,7 +20,11 @@ pub fn ask(config: &AiConfig, prompt: &str, image_path: Option<&str>) -> Result<
 
     match config.provider.as_str() {
         "anthropic" => ask_anthropic(config, &key, prompt, image_b64.as_deref()),
-        "openai" | "cursor" => ask_openai(config, &key, prompt, image_b64.as_deref()),
+        // "cursor" kept as a legacy alias for the OpenAI-compatible path.
+        "openai" | "openai-compatible" | "cursor" => {
+            ask_openai(config, &key, prompt, image_b64.as_deref())
+        }
+        "gemini" | "google" => ask_gemini(config, &key, prompt, image_b64.as_deref()),
         other => Err(format!("Unknown AI provider: {other}")),
     }
 }
@@ -101,6 +105,99 @@ fn ask_openai(
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "Unexpected response from OpenAI-compatible endpoint".to_string())
+}
+
+/// Default Gemini model when none is configured.
+const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-flash";
+
+fn ask_gemini(
+    config: &AiConfig,
+    key: &str,
+    prompt: &str,
+    image_b64: Option<&str>,
+) -> Result<String, String> {
+    let base = if config.endpoint.is_empty() {
+        "https://generativelanguage.googleapis.com".to_string()
+    } else {
+        config.endpoint.trim_end_matches('/').to_string()
+    };
+    let model = if config.model.is_empty() {
+        GEMINI_DEFAULT_MODEL
+    } else {
+        config.model.as_str()
+    };
+    let url = format!("{base}/v1beta/models/{model}:generateContent");
+
+    let mut parts = vec![json!({"text": prompt})];
+    if let Some(b64) = image_b64 {
+        parts.push(json!({
+            "inline_data": {"mime_type": "image/png", "data": b64}
+        }));
+    }
+    let body = json!({
+        "contents": [{"parts": parts}],
+    });
+
+    // Send the key in a header (not the URL query) so it never lands in logs.
+    // Disable status-as-error so we can read Gemini's JSON error body (which
+    // carries a human-readable message) instead of just a status code.
+    let mut resp = ureq::post(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("x-goog-api-key", key)
+        .header("content-type", "application/json")
+        .send_json(body)
+        .map_err(|e| e.to_string())?;
+
+    let value: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+
+    if let Some(message) = value
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
+        return Err(format!("Gemini error: {message}"));
+    }
+
+    let candidate = value
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .ok_or_else(|| {
+            // No candidates usually means the prompt or response was blocked.
+            match value
+                .get("promptFeedback")
+                .and_then(|f| f.get("blockReason"))
+                .and_then(|r| r.as_str())
+            {
+                Some(reason) => format!("Gemini returned no answer (blocked: {reason})"),
+                None => "Gemini returned no candidates".to_string(),
+            }
+        })?;
+
+    // Concatenate every text part of the candidate's content.
+    let text: String = candidate
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    if text.is_empty() {
+        // A finishReason without text (e.g. SAFETY, MAX_TOKENS) is more useful
+        // than an empty string.
+        if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
+            return Err(format!("Gemini returned no text (finish reason: {reason})"));
+        }
+        return Err("Unexpected response from Gemini".to_string());
+    }
+    Ok(text)
 }
 
 /// Minimal standard base64 encoder (no padding shortcuts), hand-rolled to avoid
