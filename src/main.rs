@@ -204,9 +204,9 @@ define_class!(
 // Horizontal/vertical inset of the rounded selection highlight within a row.
 const SELECTION_INSET_X: f64 = 8.0;
 const SELECTION_INSET_Y: f64 = 4.0;
-// Inset of the right-side source tag in from the selection highlight's right
-// edge, so the tag sits comfortably inside the highlighted row.
-const TAG_RIGHT_INSET: f64 = 14.0;
+// Gap between the row icon and the title/subtitle text, and between the text and
+// the right-side source tag.
+const ROW_TEXT_GAP: f64 = 14.0;
 
 // Custom row view that draws a rounded, inset selection highlight (Raycast-style)
 // instead of the default full-width table highlight.
@@ -2049,11 +2049,29 @@ fn make_row_cell(
     icon_view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
     container.addSubview(&icon_view);
 
-    let text_x = SIDE_INSET + ROW_ICON + 12.0;
+    // Title and subtitle share this fixed left edge (icon inset + icon + gap).
+    let text_x = SIDE_INSET + ROW_ICON + ROW_TEXT_GAP;
 
-    // Optional right-aligned source tag (e.g. "App", "File"). It must sit
-    // comfortably INSIDE the inset selection highlight, so its right edge is
-    // pinned a fixed inset in from the highlight's right edge (not the row edge).
+    // Compute the title/subtitle vertical layout up front so the right-side tag
+    // can be aligned to the *title's* vertical center (cleaner on two-line rows
+    // than centering it in the gap between the two lines).
+    let title_h = line_height(15.0, true);
+    let (title_y, subtitle_layout) = if item.subtitle.is_empty() {
+        // Single line: center the title within the row.
+        (((ROW_H - title_h) / 2.0).round(), None)
+    } else {
+        // Two lines: center the (title + gap + subtitle) block within the row.
+        const GAP: f64 = 2.0;
+        let sub_h = line_height(12.0, false);
+        let block = title_h + GAP + sub_h;
+        let bottom = ((ROW_H - block) / 2.0).round();
+        (bottom + sub_h + GAP, Some((bottom, sub_h)))
+    };
+    let title_center = title_y + title_h / 2.0;
+
+    // Optional right-aligned source tag (e.g. "App", "File"), vertically aligned
+    // to the title center and inset symmetrically with the icon so it sits
+    // comfortably INSIDE the rounded selection highlight (never flush/clipped).
     let mut right_edge = width - SIDE_INSET;
     if let Some(tag_text) = source_tag(item.source) {
         let tag = make_label(
@@ -2064,33 +2082,23 @@ fn make_row_cell(
             &NSColor::tertiaryLabelColor(),
         );
         tag.sizeToFit();
-        let tag_w = tag.frame().size.width;
+        let tag_w = tag.frame().size.width.ceil();
         let tag_h = line_height(11.0, false);
-        let tag_right = width - SELECTION_INSET_X - TAG_RIGHT_INSET;
-        let tag_x = tag_right - tag_w;
-        let tag_y = ((ROW_H - tag_h) / 2.0).round();
-        tag.setFrame(NSRect::new(
-            NSPoint::new(tag_x, tag_y),
-            NSSize::new(tag_w, tag_h),
-        ));
+        let tag_x = (width - SIDE_INSET - tag_w).round();
+        let tag_y = (title_center - tag_h / 2.0).round();
+        tag.setFrame(NSRect::new(NSPoint::new(tag_x, tag_y), NSSize::new(tag_w, tag_h)));
         container.addSubview(&tag);
-        right_edge = tag_x - 12.0;
+        right_edge = tag_x - ROW_TEXT_GAP;
     }
     let text_w = (right_edge - text_x).max(40.0);
 
-    let title_h = line_height(15.0, true);
-    if item.subtitle.is_empty() {
-        // Single line: center the title band within the row.
-        let y = ((ROW_H - title_h) / 2.0).round();
-        let title = make_label(mtm, &item.title, 15.0, weight_medium(), &NSColor::labelColor());
-        title.setFrame(NSRect::new(NSPoint::new(text_x, y), NSSize::new(text_w, title_h)));
-        container.addSubview(&title);
-    } else {
-        // Two lines: center the (title + gap + subtitle) block within the row.
-        const GAP: f64 = 2.0;
-        let sub_h = line_height(12.0, false);
-        let block = title_h + GAP + sub_h;
-        let bottom = ((ROW_H - block) / 2.0).round();
+    let title = make_label(mtm, &item.title, 15.0, weight_medium(), &NSColor::labelColor());
+    title.setFrame(NSRect::new(
+        NSPoint::new(text_x, title_y),
+        NSSize::new(text_w, title_h),
+    ));
+    container.addSubview(&title);
+    if let Some((bottom, sub_h)) = subtitle_layout {
         let subtitle = make_label(
             mtm,
             &item.subtitle,
@@ -2103,12 +2111,6 @@ fn make_row_cell(
             NSSize::new(text_w, sub_h),
         ));
         container.addSubview(&subtitle);
-        let title = make_label(mtm, &item.title, 15.0, weight_medium(), &NSColor::labelColor());
-        title.setFrame(NSRect::new(
-            NSPoint::new(text_x, bottom + sub_h + GAP),
-            NSSize::new(text_w, title_h),
-        ));
-        container.addSubview(&title);
     }
 
     container
