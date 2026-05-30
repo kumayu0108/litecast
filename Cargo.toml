@@ -1,0 +1,92 @@
+[package]
+name = "litecast"
+version = "0.1.0"
+edition = "2021"
+description = "A super-lightweight Spotlight/Raycast-style launcher for macOS"
+license = "MIT"
+
+[dependencies]
+global-hotkey = "0.8.0"
+keyring = { version = "3", features = ["apple-native"] }
+nucleo-matcher = "0.3.1"
+objc2 = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+ureq = { version = "3", features = ["json"] }
+
+[dependencies.objc2-foundation]
+version = "0.3"
+features = [
+    "std",
+    "NSString",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSURL",
+    "NSGeometry",
+    "NSValue",
+    "NSThread",
+    "NSNotification",
+    "NSRunLoop",
+    "NSDate",
+    "NSData",
+    "NSFileManager",
+    "NSBundle",
+    "NSError",
+    "NSProcessInfo",
+    "NSPathUtilities",
+]
+
+[dependencies.objc2-app-kit]
+version = "0.3"
+features = [
+    "std",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSApplication",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSControl",
+    "NSText",
+    "NSCell",
+    "NSTextField",
+    "NSSearchField",
+    "NSSecureTextField",
+    "NSVisualEffectView",
+    "NSTableView",
+    "NSTableColumn",
+    "NSScrollView",
+    "NSColor",
+    "NSFont",
+    "NSImage",
+    "NSImageView",
+    "NSWorkspace",
+    "NSPasteboard",
+    "NSEvent",
+    "NSScreen",
+    "NSStackView",
+    "NSRunningApplication",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSLayoutConstraint",
+    "NSLayoutAnchor",
+    "NSMenu",
+    "NSMenuItem",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSButton",
+    "NSAttributedString",
+    "NSParagraphStyle",
+    "NSAnimationContext",
+    "NSTrackingArea",
+    "NSAppearance",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
