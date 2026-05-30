@@ -23,12 +23,14 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSAnimationContext, NSBitmapImageFileType, NSBitmapImageRep, NSBox, NSBoxType, NSColor,
-    NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSImage, NSImageView,
-    NSPanel, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
-    NSScreen, NSScrollView, NSTableColumn, NSTableView, NSTextField, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSAnimationContext, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox, NSBoxType,
+    NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
+    NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
+    NSPasteboardTypePNG, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableRowView, NSTableView,
+    NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSDictionary, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint,
@@ -80,7 +82,10 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
 const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
 const ROW_ICON: f64 = 26.0;
-const CORNER_RADIUS: f64 = 18.0;
+const CORNER_RADIUS: f64 = 20.0;
+// Shared left/right margin for the search field, separator, and result rows so
+// everything aligns on a common edge.
+const SIDE_INSET: f64 = 22.0;
 // Vertical breathing room around the results list (bottom-left origin), so rows
 // are never flush against the window edge / rounded corners.
 const RESULTS_TOP_GAP: f64 = 6.0;
@@ -142,6 +147,40 @@ define_class!(
             }
             let passed: bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
             passed.into()
+        }
+    }
+);
+
+// Horizontal/vertical inset of the rounded selection highlight within a row.
+const SELECTION_INSET_X: f64 = 8.0;
+const SELECTION_INSET_Y: f64 = 4.0;
+
+// Custom row view that draws a rounded, inset selection highlight (Raycast-style)
+// instead of the default full-width table highlight.
+define_class!(
+    #[unsafe(super(NSTableRowView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "LcRowView"]
+    struct LcRowView;
+
+    impl LcRowView {
+        #[unsafe(method(drawSelectionInRect:))]
+        fn draw_selection(&self, _dirty: NSRect) {
+            if !self.isSelected() {
+                return;
+            }
+            let b = self.bounds();
+            let rect = NSRect::new(
+                NSPoint::new(SELECTION_INSET_X, SELECTION_INSET_Y),
+                NSSize::new(
+                    (b.size.width - 2.0 * SELECTION_INSET_X).max(0.0),
+                    (b.size.height - 2.0 * SELECTION_INSET_Y).max(0.0),
+                ),
+            );
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 9.0, 9.0);
+            let color = NSColor::controlAccentColor().colorWithAlphaComponent(0.20);
+            color.set();
+            path.fill();
         }
     }
 );
@@ -381,6 +420,18 @@ define_class!(
         #[unsafe(method(numberOfRowsInTableView:))]
         fn number_of_rows(&self, _table: &NSTableView) -> isize {
             self.ivars().results.borrow().len() as isize
+        }
+
+        // NSTableViewDelegate: supply our custom row view for inset selection.
+        #[unsafe(method_id(tableView:rowViewForRow:))]
+        fn row_view_for_row(
+            &self,
+            _table: &NSTableView,
+            _row: isize,
+        ) -> Option<Retained<NSTableRowView>> {
+            let view = LcRowView::alloc(self.mtm());
+            let view: Retained<LcRowView> = unsafe { msg_send![view, init] };
+            Some(Retained::into_super(view))
         }
 
         // NSTableViewDelegate (view-based row)
@@ -956,7 +1007,7 @@ impl AppDelegate {
         let natural_w = chip.frame().size.width;
         let chip_h = (line_height(12.0, true) + 8.0).round();
         let chip_w = (natural_w + 22.0).round();
-        let chip_x = PANEL_WIDTH - 22.0 - chip_w;
+        let chip_x = PANEL_WIDTH - SIDE_INSET - chip_w;
         let chip_y = (band_bottom + (SEARCH_AREA_H - chip_h) / 2.0).round();
         chip.setFrame(NSRect::new(
             NSPoint::new(chip_x, chip_y),
@@ -971,15 +1022,15 @@ impl AppDelegate {
         let search_h = line_height(24.0, false);
         let search_y = (band_bottom + (SEARCH_AREA_H - search_h) / 2.0).round();
         let search_frame = NSRect::new(
-            NSPoint::new(22.0, search_y),
-            NSSize::new((search_right - 22.0).max(40.0), search_h),
+            NSPoint::new(SIDE_INSET, search_y),
+            NSSize::new((search_right - SIDE_INSET).max(40.0), search_h),
         );
         ivars.search.setFrame(search_frame);
 
         // Hairline separator on the boundary between the search area and results.
         let separator_frame = NSRect::new(
-            NSPoint::new(18.0, band_bottom),
-            NSSize::new(PANEL_WIDTH - 36.0, 1.0),
+            NSPoint::new(SIDE_INSET, band_bottom),
+            NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, 1.0),
         );
         ivars.separator.setFrame(separator_frame);
         ivars.separator.setHidden(visible_rows == 0);
@@ -1083,11 +1134,19 @@ fn line_height(size: f64, bold: bool) -> f64 {
     (font.ascender() - font.descender() + font.leading()).ceil()
 }
 
+// Reading the AppKit font-weight statics is safe (immutable CGFloat constants).
+fn weight_medium() -> NSFontWeight {
+    unsafe { NSFontWeightMedium }
+}
+fn weight_regular() -> NSFontWeight {
+    unsafe { NSFontWeightRegular }
+}
+
 fn make_label(
     mtm: MainThreadMarker,
     text: &str,
     size: f64,
-    bold: bool,
+    weight: NSFontWeight,
     color: &NSColor,
 ) -> Retained<NSTextField> {
     let field = NSTextField::initWithFrame(
@@ -1100,11 +1159,8 @@ fn make_label(
     field.setDrawsBackground(false);
     field.setEditable(false);
     field.setSelectable(false);
-    let font = if bold {
-        NSFont::boldSystemFontOfSize(size)
-    } else {
-        NSFont::systemFontOfSize(size)
-    };
+    field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    let font = NSFont::systemFontOfSize_weight(size, weight);
     field.setFont(Some(&font));
     field.setTextColor(Some(color));
     field
@@ -1130,17 +1186,41 @@ fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
     NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
 }
 
+/// Short right-aligned category tag shown on each row. `None` hides the tag
+/// (e.g. for the playful easter-egg source).
+fn source_tag(source: &str) -> Option<&'static str> {
+    match source {
+        "App" => Some("App"),
+        "File" => Some("File"),
+        "Calc" => Some("Calc"),
+        "Convert" => Some("Convert"),
+        "Web" => Some("Web"),
+        "AI" => Some("AI"),
+        "Clip" => Some("Clipboard"),
+        "Command" => Some("Command"),
+        "Snippet" => Some("Snippet"),
+        "Quicklink" => Some("Quicklink"),
+        "Emoji" => Some("Emoji"),
+        "Bookmark" => Some("Bookmark"),
+        "History" => Some("History"),
+        "Plugin" => Some("Plugin"),
+        _ => None,
+    }
+}
+
 fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
-    let width = PANEL_WIDTH - 16.0;
+    let width = PANEL_WIDTH;
     let container = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, ROW_H)),
     );
 
+    // Icon left edge shares the search field's left margin so everything lines
+    // up on a common left edge.
     let icon_view = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
         NSRect::new(
-            NSPoint::new(12.0, (ROW_H - ROW_ICON) / 2.0),
+            NSPoint::new(SIDE_INSET, (ROW_H - ROW_ICON) / 2.0),
             NSSize::new(ROW_ICON, ROW_ICON),
         ),
     );
@@ -1150,14 +1230,37 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
     icon_view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
     container.addSubview(&icon_view);
 
-    let text_x = 12.0 + ROW_ICON + 12.0;
-    let text_w = width - text_x - 14.0;
+    let text_x = SIDE_INSET + ROW_ICON + 12.0;
+
+    // Optional right-aligned source tag (e.g. "App", "Calc"), like Raycast.
+    let mut right_edge = width - SIDE_INSET;
+    if let Some(tag_text) = source_tag(item.source) {
+        let tag = make_label(
+            mtm,
+            tag_text,
+            11.0,
+            weight_regular(),
+            &NSColor::tertiaryLabelColor(),
+        );
+        tag.sizeToFit();
+        let tag_w = tag.frame().size.width;
+        let tag_h = line_height(11.0, false);
+        let tag_x = width - SIDE_INSET - tag_w;
+        let tag_y = ((ROW_H - tag_h) / 2.0).round();
+        tag.setFrame(NSRect::new(
+            NSPoint::new(tag_x, tag_y),
+            NSSize::new(tag_w, tag_h),
+        ));
+        container.addSubview(&tag);
+        right_edge = tag_x - 12.0;
+    }
+    let text_w = (right_edge - text_x).max(40.0);
 
     let title_h = line_height(15.0, true);
     if item.subtitle.is_empty() {
         // Single line: center the title band within the row.
         let y = ((ROW_H - title_h) / 2.0).round();
-        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
+        let title = make_label(mtm, &item.title, 15.0, weight_medium(), &NSColor::labelColor());
         title.setFrame(NSRect::new(NSPoint::new(text_x, y), NSSize::new(text_w, title_h)));
         container.addSubview(&title);
     } else {
@@ -1166,14 +1269,19 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
         let sub_h = line_height(12.0, false);
         let block = title_h + GAP + sub_h;
         let bottom = ((ROW_H - block) / 2.0).round();
-        let subtitle =
-            make_label(mtm, &item.subtitle, 12.0, false, &NSColor::secondaryLabelColor());
+        let subtitle = make_label(
+            mtm,
+            &item.subtitle,
+            12.0,
+            weight_regular(),
+            &NSColor::secondaryLabelColor(),
+        );
         subtitle.setFrame(NSRect::new(
             NSPoint::new(text_x, bottom),
             NSSize::new(text_w, sub_h),
         ));
         container.addSubview(&subtitle);
-        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
+        let title = make_label(mtm, &item.title, 15.0, weight_medium(), &NSColor::labelColor());
         title.setFrame(NSRect::new(
             NSPoint::new(text_x, bottom + sub_h + GAP),
             NSSize::new(text_w, title_h),
@@ -1227,7 +1335,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     // Frosted translucent background with clipped rounded corners. Sidebar is a
     // clean, system-adaptive material that reads well as a Spotlight-style panel.
     let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content_rect);
-    effect.setMaterial(NSVisualEffectMaterial::Sidebar);
+    effect.setMaterial(NSVisualEffectMaterial::Menu);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
     effect.setWantsLayer(true);
@@ -1244,8 +1352,8 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
 
     // Borderless, transparent, large text field for a native Spotlight feel.
     let search_rect = NSRect::new(
-        NSPoint::new(22.0, 14.0),
-        NSSize::new(PANEL_WIDTH - 44.0, 40.0),
+        NSPoint::new(SIDE_INSET, 14.0),
+        NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, 40.0),
     );
     let search = NSTextField::initWithFrame(NSTextField::alloc(mtm), search_rect);
     search.setBezeled(false);
@@ -1264,7 +1372,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
     let column =
         NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &NSString::from_str("main"));
-    column.setWidth(PANEL_WIDTH - 16.0);
+    column.setWidth(PANEL_WIDTH);
     table.addTableColumn(&column);
     table.setHeaderView(None);
     table.setRowHeight(ROW_H);
