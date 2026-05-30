@@ -270,8 +270,39 @@ fn compute_target(
             w: vf.w,
             h: vf.h / 2.0,
         },
+        // Quarters: upper row is higher y in Cocoa's bottom-left space.
+        WindowOp::TopLeft => Rect {
+            x: vf.x,
+            y: vf.y + vf.h / 2.0,
+            w: vf.w / 2.0,
+            h: vf.h / 2.0,
+        },
+        WindowOp::TopRight => Rect {
+            x: vf.x + vf.w / 2.0,
+            y: vf.y + vf.h / 2.0,
+            w: vf.w / 2.0,
+            h: vf.h / 2.0,
+        },
+        WindowOp::BottomLeft => Rect {
+            x: vf.x,
+            y: vf.y,
+            w: vf.w / 2.0,
+            h: vf.h / 2.0,
+        },
+        WindowOp::BottomRight => Rect {
+            x: vf.x + vf.w / 2.0,
+            y: vf.y,
+            w: vf.w / 2.0,
+            h: vf.h / 2.0,
+        },
         WindowOp::LeftThird => Rect {
             x: vf.x,
+            y: vf.y,
+            w: vf.w / 3.0,
+            h: vf.h,
+        },
+        WindowOp::CenterThird => Rect {
+            x: vf.x + vf.w / 3.0,
             y: vf.y,
             w: vf.w / 3.0,
             h: vf.h,
