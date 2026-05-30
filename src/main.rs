@@ -914,28 +914,41 @@ impl AppDelegate {
         );
         ivars.panel.setFrame_display(frame, true);
 
-        // Filter chip on the right of the search area (hidden when unfiltered).
-        // It is laid out first so the search field can reserve room for it.
+        // Filter chip on the right of the search area. Always visible: a faint
+        // "Tab to filter" hint when unfiltered (discoverability), an accent pill
+        // showing the category when a filter is active. Laid out first so the
+        // search field can reserve room for it.
         let filter = ivars.active_filter.get();
-        let mut search_right = PANEL_WIDTH - 22.0;
-        if filter == Filter::All {
-            ivars.chip.setHidden(true);
+        let chip = &ivars.chip;
+        let (label, text_color, bg_color) = if filter == Filter::All {
+            (
+                "\u{21e5} Filter".to_string(),
+                NSColor::tertiaryLabelColor(),
+                NSColor::labelColor().colorWithAlphaComponent(0.06),
+            )
         } else {
-            let chip = &ivars.chip;
-            chip.setStringValue(&NSString::from_str(filter.label()));
-            chip.sizeToFit();
-            let natural_w = chip.frame().size.width;
-            let chip_h = (line_height(12.0, true) + 6.0).round();
-            let chip_w = (natural_w + 18.0).round();
-            let chip_x = PANEL_WIDTH - 22.0 - chip_w;
-            let chip_y = (results_h + (SEARCH_AREA_H - chip_h) / 2.0).round();
-            chip.setFrame(NSRect::new(
-                NSPoint::new(chip_x, chip_y),
-                NSSize::new(chip_w, chip_h),
-            ));
-            chip.setHidden(false);
-            search_right = chip_x - 12.0;
-        }
+            let accent = NSColor::controlAccentColor();
+            (
+                format!("\u{21e5} {}", filter.label()),
+                accent.clone(),
+                accent.colorWithAlphaComponent(0.18),
+            )
+        };
+        chip.setStringValue(&NSString::from_str(&label));
+        chip.setTextColor(Some(&text_color));
+        chip.setBackgroundColor(Some(&bg_color));
+        chip.sizeToFit();
+        let natural_w = chip.frame().size.width;
+        let chip_h = (line_height(12.0, true) + 6.0).round();
+        let chip_w = (natural_w + 18.0).round();
+        let chip_x = PANEL_WIDTH - 22.0 - chip_w;
+        let chip_y = (results_h + (SEARCH_AREA_H - chip_h) / 2.0).round();
+        chip.setFrame(NSRect::new(
+            NSPoint::new(chip_x, chip_y),
+            NSSize::new(chip_w, chip_h),
+        ));
+        chip.setHidden(false);
+        let search_right = chip_x - 12.0;
 
         // Search field sized to its exact text height and centered in the top
         // search area, so the text sits on the vertical midline (a tall field
