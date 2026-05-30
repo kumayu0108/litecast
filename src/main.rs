@@ -20,7 +20,8 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSColor, NSControl, NSFont, NSPanel, NSPasteboard, NSPasteboardTypeString, NSScreen,
+    NSAnimationContext, NSColor, NSControl, NSFont, NSPanel, NSPasteboard, NSPasteboardTypeString,
+    NSScreen,
     NSScrollView, NSSearchField, NSTableColumn, NSTableView, NSTextField,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
@@ -35,8 +36,8 @@ use config::{AiConfig, Config};
 use engine::Engine;
 use model::{Action, Item};
 use providers::{
-    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider,
-    PluginProvider, WebSearchProvider,
+    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, EasterEggProvider,
+    FilesProvider, PluginProvider, WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -46,6 +47,14 @@ const PANEL_WIDTH: f64 = 680.0;
 const SEARCH_AREA_H: f64 = 64.0;
 const PLACEHOLDER_NORMAL: &str = "Search litecast...";
 const PLACEHOLDER_SHOT: &str = "Ask about the screenshot, then press Enter...";
+const PLAYFUL_PLACEHOLDERS: &[&str] = &[
+    "What are we launching today?",
+    "Type to search, dream to launch...",
+    "Ask me anything (try a ? prefix)",
+    "Apps, files, math, the web - go on.",
+    "I was just resting, honest.",
+    "Your wish is my command... command.",
+];
 const ROW_H: f64 = 44.0;
 const MAX_VISIBLE_ROWS: usize = 8;
 // Fraction of the screen height where the panel's top edge sits.
@@ -98,6 +107,10 @@ struct Ivars {
     screenshot_path: RefCell<Option<String>>,
     /// Captured screenshot path awaiting the main thread.
     shot_pending: Arc<Mutex<Option<String>>>,
+    /// Whether to rotate playful placeholder text.
+    playful_placeholders: bool,
+    /// Rotating index into the playful placeholder list.
+    placeholder_idx: Cell<usize>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -260,16 +273,36 @@ impl AppDelegate {
     }
 
     fn show(&self) {
-        let mtm = self.mtm();
         let ivars = self.ivars();
-        self.layout(self.ivars().results.borrow().len());
-        let _ = mtm;
+        self.layout(ivars.results.borrow().len());
+
+        // Rotate a playful placeholder (unless in screenshot mode).
+        if ivars.playful_placeholders && ivars.screenshot_path.borrow().is_none() {
+            let idx = ivars.placeholder_idx.get();
+            ivars.placeholder_idx.set(idx.wrapping_add(1));
+            let text = PLAYFUL_PLACEHOLDERS[idx % PLAYFUL_PLACEHOLDERS.len()];
+            ivars
+                .search
+                .setPlaceholderString(Some(&NSString::from_str(text)));
+        }
+
         let app = NSApplication::sharedApplication(self.mtm());
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
+
+        // Subtle fade-in.
+        ivars.panel.setAlphaValue(0.0);
         ivars.panel.makeKeyAndOrderFront(None);
         ivars.panel.makeFirstResponder(Some(&ivars.search));
         ivars.visible.set(true);
+        unsafe {
+            NSAnimationContext::beginGrouping();
+            let ctx = NSAnimationContext::currentContext();
+            ctx.setDuration(0.12);
+            let animator: Retained<AnyObject> = msg_send![&*ivars.panel, animator];
+            let _: () = msg_send![&animator, setAlphaValue: 1.0_f64];
+            NSAnimationContext::endGrouping();
+        }
     }
 
     fn hide_and_reset(&self) {
@@ -658,6 +691,7 @@ fn build_panel(
 
 fn build_engine(history: History, config: &Config) -> Engine {
     let mut engine = Engine::new();
+    engine.add(Box::new(EasterEggProvider));
     engine.add(Box::new(AiProvider::new(config.ai.clone())));
     engine.add(Box::new(CalcProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
@@ -710,6 +744,8 @@ fn main() {
         ai_generation: Cell::new(0),
         screenshot_path: RefCell::new(None),
         shot_pending: Arc::new(Mutex::new(None)),
+        playful_placeholders: config.ui.playful_placeholders,
+        placeholder_idx: Cell::new(0),
         _hotkey_manager: manager,
     };
 
