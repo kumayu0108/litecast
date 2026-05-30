@@ -19,6 +19,7 @@ so it stays fast and lean.
 - Global hotkey to toggle the search panel.
 - Fuzzy app launcher.
 - File search (backed by the macOS Spotlight index via `mdfind`).
+- Category filters - scope results with an `@` prefix or a Tab-cycled chip.
 - Frecency ranking - frequently and recently used items drift to the top.
 - Inline calculator (hand-rolled evaluator).
 - Unit & currency conversion (`10 km in mi`, `100 usd to eur`).
@@ -56,6 +57,17 @@ Open the panel and start typing:
 - Anything else offers a web search.
 
 Frequently and recently activated results are automatically boosted toward the top.
+
+### Filters
+
+Scope results to one category, either by typing a prefix or cycling a chip:
+
+- Prefixes: `@apps`, `@files`, `@clip`, `@calc`, `@web`, `@cmd`, `@emoji`, `@ai`
+  (e.g. `@apps safari`, `@calc 100 usd to eur`).
+- Press `Tab` to cycle the filter forward (`All -> Apps -> ... -> AI -> All`) and
+  `Shift+Tab` to cycle back. The active filter shows as a pill near the search box.
+
+Both share one state. `Esc` clears an active filter first, then closes the panel.
 
 Arrow keys move the selection, `Enter` activates, `Esc` dismisses.
 

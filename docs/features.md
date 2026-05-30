@@ -4,6 +4,36 @@ Quick reference for the built-in providers, their triggers, and the related
 `config.toml` sections. All config fields use `serde(default)`, so adding any of
 these to an existing config is backward compatible.
 
+## Search filters (scope results to a category)
+
+Scope results to a single category two interchangeable ways:
+
+- **Typed prefix:** start the query with an `@token` followed by a space:
+  `@apps safari`, `@files report`, `@calc 10 km in mi`, `@web rust`,
+  `@cmd lock`, `@emoji fire`, `@ai explain x`. `@clip` (and any token alone)
+  scopes with an empty query.
+- **Tab chip:** press **Tab** to cycle the filter forward
+  (`All -> Apps -> Files -> Clipboard -> Calc -> Web -> Commands -> Emoji -> AI -> All`)
+  and **Shift+Tab** to cycle backward. The active filter shows as a small pill in
+  the search area.
+
+Both drive the same active filter. **Esc** clears an active filter first, then
+(when already on `All`) closes the panel. Tokens and the categories they map to:
+
+| Token | Category | Includes (source labels) |
+| --- | --- | --- |
+| `@apps` | Apps | App |
+| `@files` | Files | File |
+| `@clip` | Clipboard | Clip |
+| `@calc` | Calc / Conversions | Calc, Convert |
+| `@web` | Web | Web |
+| `@cmd` | Commands | Command, Quicklink, Snippet, System, Plugin |
+| `@emoji` | Emoji | Emoji |
+| `@ai` | AI | AI |
+
+When a filter is active, only that category's providers run, so unrelated (and
+sometimes expensive, like the `mdfind` file search) work is skipped.
+
 ## Ranking: frecency
 
 Every activation is recorded to `usage.json` in the support dir. Frequently and
