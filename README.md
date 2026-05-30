@@ -52,8 +52,34 @@ so it stays fast and lean.
 
 ## Hotkeys
 
-- `Option + Space` - toggle the launcher panel.
+- `Option + Space` - toggle the launcher panel (configurable; see below).
 - `Option + Shift + Space` - capture a screen region and ask the AI about it.
+- `Cmd + 1 … 9` - while the panel is open, select the Nth category chip
+  (`Cmd+1` = All, `Cmd+2` = Apps, `Cmd+3` = Files, …), Spotlight-style.
+- `Tab` / `Shift+Tab` cycle the category filter; arrow keys move the selection;
+  `Enter` activates; `Esc` clears a filter, then closes.
+
+### Changing the toggle hotkey (and using Cmd + Space)
+
+The toggle and screenshot combos are configurable in `config.toml`:
+
+```toml
+[hotkey]
+toggle = "Cmd+Space"
+screenshot = "Cmd+Shift+Space"
+```
+
+Combo syntax is `modifiers + key` (modifiers: `Cmd`/`Command`/`Super`,
+`Ctrl`, `Alt`/`Option`, `Shift`). At least one modifier is required.
+
+To use **Cmd + Space**, first free it from Spotlight:
+
+1. Open **System Settings → Keyboard → Keyboard Shortcuts… → Spotlight**.
+2. Uncheck **Show Spotlight search** (the `⌘Space` binding). Optionally also
+   uncheck **Show Finder search window** (`⌥⌘Space`).
+3. Set `toggle = "Cmd+Space"` in `[hotkey]` and restart litecast.
+
+Option+Space keeps working out of the box if you'd rather not touch Spotlight.
 
 You can also define your own global hotkeys in the config via `[[hotkeys]]` (see
 [Custom global hotkeys](docs/features.md#custom-global-hotkeys) for the combo

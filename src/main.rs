@@ -162,6 +162,21 @@ define_class!(
                     .charactersIgnoringModifiers()
                     .map(|c| c.to_string())
                     .unwrap_or_default();
+                // Cmd+1..9 selects the Nth category chip (Spotlight-style),
+                // routed to the window delegate (the AppDelegate).
+                if let Some(c) = chars.chars().next() {
+                    if ('1'..='9').contains(&c) {
+                        let delegate: Option<Retained<AnyObject>> =
+                            unsafe { msg_send![self, delegate] };
+                        if let Some(delegate) = delegate {
+                            let idx = (c as u8 - b'1') as isize;
+                            unsafe {
+                                let _: () = msg_send![&*delegate, selectChipByIndex: idx];
+                            }
+                            return true.into();
+                        }
+                    }
+                }
                 let selector = match chars.as_str() {
                     "a" => Some(sel!(selectAll:)),
                     "c" => Some(sel!(copy:)),
@@ -590,6 +605,21 @@ define_class!(
             if let Some(filter) = Filter::CYCLE.get(idx).copied() {
                 self.set_filter(filter);
                 let ivars = self.ivars();
+                ivars.panel.makeFirstResponder(Some(&ivars.search));
+            }
+        }
+
+        // Cmd+1..9: select the Nth category chip by its displayed order (0-based
+        // index). No-op when hidden or out of range, and never reached while
+        // editing text (Cmd+digit is not a text-input command).
+        #[unsafe(method(selectChipByIndex:))]
+        fn select_chip_by_index(&self, index: isize) {
+            let ivars = self.ivars();
+            if !ivars.visible.get() || index < 0 {
+                return;
+            }
+            if let Some(filter) = Filter::CYCLE.get(index as usize).copied() {
+                self.set_filter(filter);
                 ivars.panel.makeFirstResponder(Some(&ivars.search));
             }
         }
@@ -2426,7 +2456,7 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
 }
 
 fn main() {
-    eprintln!("[litecast] starting; press Option+Space to toggle the panel");
+    eprintln!("[litecast] starting...");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -2460,14 +2490,42 @@ fn main() {
     };
 
     let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
-    let toggle_hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-    let shot_hotkey = HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
+    // Toggle/screenshot combos are configurable via `[hotkey]`; fall back to the
+    // built-in Option+Space / Option+Shift+Space when unset or unparseable.
+    let toggle_hotkey = parse_hotkey_combo(&config.hotkey.toggle).unwrap_or_else(|| {
+        if !config.hotkey.toggle.is_empty() {
+            eprintln!(
+                "[litecast] invalid [hotkey] toggle {:?}; using Option+Space",
+                config.hotkey.toggle
+            );
+        }
+        HotKey::new(Some(Modifiers::ALT), Code::Space)
+    });
+    let shot_hotkey = parse_hotkey_combo(&config.hotkey.screenshot).unwrap_or_else(|| {
+        if !config.hotkey.screenshot.is_empty() {
+            eprintln!(
+                "[litecast] invalid [hotkey] screenshot {:?}; using Option+Shift+Space",
+                config.hotkey.screenshot
+            );
+        }
+        HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
+    });
     if let Err(e) = manager.register(toggle_hotkey) {
-        eprintln!("[litecast] failed to register toggle hotkey Option+Space: {e}");
+        eprintln!(
+            "[litecast] failed to register toggle hotkey {}: {e}",
+            config.hotkey.toggle
+        );
     }
     if let Err(e) = manager.register(shot_hotkey) {
-        eprintln!("[litecast] failed to register screenshot hotkey Option+Shift+Space: {e}");
+        eprintln!(
+            "[litecast] failed to register screenshot hotkey {}: {e}",
+            config.hotkey.screenshot
+        );
     }
+    eprintln!(
+        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
+        config.hotkey.toggle
+    );
     let toggle_id = toggle_hotkey.id();
     let shot_id = shot_hotkey.id();
 

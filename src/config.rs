@@ -94,6 +94,16 @@ web_search_url = "https://www.google.com/search?q={}"
 # text = "1 Main St, Springfield"
 # paste = false
 
+# Toggle/screenshot hotkeys. The combo syntax matches [[hotkeys]] above
+# (modifiers + a key). Defaults: toggle = "Option+Space", screenshot =
+# "Option+Shift+Space". To use Cmd+Space instead, first free it by disabling
+# Spotlight's shortcut in System Settings > Keyboard > Keyboard Shortcuts >
+# Spotlight ("Show Spotlight search"), then set:
+#
+# [hotkey]
+# toggle = "Cmd+Space"
+# screenshot = "Cmd+Shift+Space"
+
 # Unit & currency conversion. Type natural queries like "10 km in mi",
 # "100 f to c", or "100 usd to eur". Currency rates are fetched from key-less
 # public APIs and cached on disk; this controls how long the cache is reused.
@@ -160,6 +170,7 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     pub window: WindowConfig,
     pub hotkeys: Vec<HotkeyConfig>,
+    pub hotkey: ToggleHotkeyConfig,
     pub notes: NotesConfig,
     pub datetime: DateTimeConfig,
 }
@@ -178,6 +189,7 @@ impl Default for Config {
             clipboard: ClipboardConfig::default(),
             window: WindowConfig::default(),
             hotkeys: Vec::new(),
+            hotkey: ToggleHotkeyConfig::default(),
             notes: NotesConfig::default(),
             datetime: DateTimeConfig::default(),
         }
@@ -234,6 +246,29 @@ pub struct HotkeyConfig {
     pub kind: String,
     /// The URL/path (open), shell command (shell), or command name (command).
     pub target: String,
+}
+
+/// The built-in toggle/screenshot global hotkeys. Combos use the same syntax as
+/// `[[hotkeys]]` (modifiers + a key, e.g. "Cmd+Space", "Option+Space"). To use
+/// Cmd+Space, first free it in System Settings by disabling Spotlight's
+/// keyboard shortcut (see the README).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ToggleHotkeyConfig {
+    /// Combo that shows/hides the launcher panel (default "Option+Space").
+    pub toggle: String,
+    /// Combo that captures a screen region for an AI question
+    /// (default "Option+Shift+Space").
+    pub screenshot: String,
+}
+
+impl Default for ToggleHotkeyConfig {
+    fn default() -> Self {
+        Self {
+            toggle: "Option+Space".to_string(),
+            screenshot: "Option+Shift+Space".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
