@@ -36,6 +36,7 @@ features = [
     "NSError",
     "NSProcessInfo",
     "NSPathUtilities",
+    "NSTimer",
 ]
 
 [dependencies.objc2-app-kit]

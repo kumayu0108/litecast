@@ -1,6 +1,7 @@
 mod clipboard;
 mod engine;
 mod model;
+mod paths;
 mod providers;
 
 use std::cell::{Cell, RefCell};
@@ -15,19 +16,20 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSColor, NSControl, NSFont, NSPanel, NSScreen, NSScrollView, NSSearchField, NSTableColumn,
-    NSTableView, NSTextField, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSColor, NSControl, NSFont, NSPanel, NSPasteboard, NSPasteboardTypeString, NSScreen,
+    NSScrollView, NSSearchField, NSTableColumn, NSTableView, NSTextField,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString,
+    NSString, NSTimer,
 };
 
+use clipboard::History;
 use engine::Engine;
 use model::Item;
-use providers::{AppsProvider, CalcProvider, FilesProvider, WebSearchProvider};
+use providers::{AppsProvider, CalcProvider, ClipboardProvider, FilesProvider, WebSearchProvider};
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 
@@ -71,6 +73,10 @@ struct Ivars {
     query_tx: mpsc::Sender<(u64, String)>,
     /// Latest computed results awaiting application on the main thread.
     pending: PendingResults,
+    /// Clipboard history shared with the watcher timer.
+    clip_history: History,
+    /// Last observed pasteboard change count.
+    last_change: Cell<isize>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -112,6 +118,22 @@ define_class!(
         #[unsafe(method(applyResults))]
         fn apply_results(&self) {
             self.apply_pending_results();
+        }
+
+        // Repeating timer: record clipboard changes into history. Only does work
+        // when the integer change count differs, so it is effectively free.
+        #[unsafe(method(pollClipboard:))]
+        fn poll_clipboard(&self, _timer: &AnyObject) {
+            let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+            let count = pasteboard.changeCount();
+            let ivars = self.ivars();
+            if count == ivars.last_change.get() {
+                return;
+            }
+            ivars.last_change.set(count);
+            if let Some(text) = unsafe { pasteboard.stringForType(NSPasteboardTypeString) } {
+                ivars.clip_history.record(text.to_string());
+            }
         }
 
         // Intercept navigation keys while editing the search field.
@@ -420,9 +442,10 @@ fn build_panel(
     (panel, search, table, scroll)
 }
 
-fn build_engine() -> Engine {
+fn build_engine(history: History) -> Engine {
     let mut engine = Engine::new();
     engine.add(Box::new(CalcProvider));
+    engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(AppsProvider::new()));
     engine.add(Box::new(FilesProvider::new()));
     engine.add(Box::new(WebSearchProvider::google()));
@@ -442,6 +465,7 @@ fn main() {
 
     let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
+    let history = History::new(50);
 
     let ivars = Ivars {
         panel,
@@ -453,6 +477,8 @@ fn main() {
         generation: Cell::new(0),
         query_tx,
         pending: pending.clone(),
+        clip_history: history.clone(),
+        last_change: Cell::new(-1),
         _hotkey_manager: manager,
     };
 
@@ -482,7 +508,7 @@ fn main() {
     // sources like mdfind never block typing) and signals the main thread when
     // results are ready. Blocks on recv when idle, so it uses zero CPU.
     {
-        let engine = Arc::new(build_engine());
+        let engine = Arc::new(build_engine(history.clone()));
         let pending = pending.clone();
         std::thread::spawn(move || {
             while let Ok((mut generation, mut query)) = query_rx.recv() {
@@ -527,6 +553,19 @@ fn main() {
             }
         }
     });
+
+    // Clipboard watcher: a 1s repeating timer that only acts when the pasteboard
+    // change count moves. Retained by the run loop.
+    let target: &AnyObject = &delegate;
+    let _clip_timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            1.0,
+            target,
+            sel!(pollClipboard:),
+            None,
+            true,
+        )
+    };
 
     app.run();
 }
