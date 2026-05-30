@@ -24,7 +24,16 @@ so it stays fast and lean.
 - Frecency ranking - frequently and recently used items drift to the top.
 - Inline calculator (hand-rolled evaluator).
 - Unit & currency conversion (`10 km in mi`, `100 usd to eur`).
-- System commands (lock, sleep, dark mode, Wi-Fi, empty trash, restart, ...).
+- Developer tools - base64, URL encode/decode, MD5/SHA-1/SHA-256, UUID v4, random passwords, lorem ipsum, JSON pretty/minify (all hand-rolled, no network).
+- Color, number-base & timestamp converters (`#ff8800`, `255 to hex`, `epoch 1700000000`).
+- Date & time - world clock (`time in Tokyo`), date math (`days until 25 Dec`), and non-blocking timers (`timer 5m`).
+- System commands (lock, sleep, dark mode, volume, Wi-Fi, Bluetooth, brightness, caffeinate, eject, Focus, empty trash, restart, ...).
+- File power actions (`reveal`, `ql`, `copypath`, `folder`) plus `recent` and `downloads` listings.
+- Calendar & reminders (`today`/`agenda`, `remind ...`, `event ...`) via AppleScript.
+- Network info (`ip`, `myip`, `ports`, `port <n>`, `wifi networks`).
+- Quick notes (`note <text>`) to a plain-text file, optionally mirrored to Apple Notes.
+- Offline dictionary & spell (`define <word>`, `spell <word>`).
+- Media controls (`play`, `pause`, `next`, `prev`, `now playing`) for Spotify/Music.
 - Emoji & symbol picker (the `emoji` keyword or a `:` prefix).
 - Text snippets (the `snip` keyword).
 - Quicklinks - parameterized `{query}` URLs.
@@ -59,7 +68,16 @@ Open the panel and start typing:
 - Type an app or file name to launch/open it.
 - Type a math expression (e.g. `12 * (3 + 4)`) for an instant result.
 - Convert units or currency: `10 km in mi`, `100 f to c`, `100 usd to eur`.
-- Search a system command by name: `lock`, `sleep`, `dark`, `wi-fi`, `trash`, ...
+- Search a system command by name: `lock`, `sleep`, `dark`, `wi-fi`, `trash`, `caffeinate`, `eject`, `volume 50`, ...
+- Developer tools: `base64 hello`, `sha256 secret`, `uuid`, `password 24`, `json {"a":1}`.
+- Convert a color or base or timestamp: `#ff8800`, `255 to hex`, `epoch 1700000000`.
+- Date & time: `time in Tokyo`, `days until 25 Dec`, `timer 10m tea`.
+- Network: `ip`, `myip`, `ports`, `port 3000`, `wifi networks`.
+- Files: `recent`, `downloads`, `reveal ~/Desktop/file.txt`, `copypath ~/notes`.
+- Calendar: `today`, `remind buy milk at 5pm`, `event Lunch at 1pm`.
+- Notes: `note remember to call back`, then `notes` to open the file.
+- Look things up: `define ephemeral`, `spell recieve`.
+- Media: `play`, `pause`, `next`, `now playing`.
   Destructive ones (empty trash, restart, shut down) need a second `Enter` to confirm.
 - Type `emoji fire` or `:fire` to find and copy an emoji/symbol.
 - Type `snip` to browse text snippets (or a snippet's own keyword); `Enter` copies it.

@@ -50,9 +50,11 @@ use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
     AiCommandsProvider, AiProvider, AppCommandsProvider, AppsProvider, BookmarksProvider,
-    CalcProvider, ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider,
-    EmojiProvider, FilesProvider, PluginProvider, ProcessProvider, QuicklinksProvider,
-    SnippetsProvider, SystemProvider, WebSearchProvider, WindowProvider,
+    CalcProvider, CalendarProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
+    ConvertersProvider, DateTimeProvider, DevToolsProvider, DictionaryProvider, EasterEggProvider,
+    EmojiProvider, FileActionsProvider, FilesProvider, MediaProvider, NetworkProvider,
+    NotesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, SnippetsProvider,
+    SystemProvider, WebSearchProvider, WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -2318,6 +2320,14 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     // Warm the rate cache in the background so the first currency query is fast.
     currency.refresh_async();
     engine.add(Box::new(ConvertProvider::new(currency)), Filter::Calc);
+    // Developer tools, color/base/epoch converters, and date/time helpers all
+    // live under the Calc category (keyword-gated, idle-cheap).
+    engine.add(Box::new(DevToolsProvider), Filter::Calc);
+    engine.add(Box::new(ConvertersProvider), Filter::Calc);
+    engine.add(
+        Box::new(DateTimeProvider::new(config.datetime.pairs())),
+        Filter::Calc,
+    );
     engine.add(Box::new(EmojiProvider), Filter::Emoji);
     engine.add(Box::new(ClipboardProvider::new(history)), Filter::Clip);
     // The "Commands" category groups user commands, quicklinks, snippets,
@@ -2360,8 +2370,24 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
     // Process manager: keyword-gated (`kill`/`ps`); kills go through a confirm.
     engine.add(Box::new(ProcessProvider::new()), Filter::Cmd);
+    // Keyword-gated utility providers (calendar/network/notes/dictionary/media).
+    // Each returns immediately unless its keyword matches, so they stay cheap on
+    // the default path; the ones that shell out only do so on a match.
+    engine.add(Box::new(CalendarProvider::new()), Filter::Cmd);
+    engine.add(Box::new(NetworkProvider::new()), Filter::Cmd);
+    engine.add(
+        Box::new(NotesProvider::new(
+            &config.notes.file,
+            config.notes.apple_notes,
+        )),
+        Filter::Cmd,
+    );
+    engine.add(Box::new(DictionaryProvider::new()), Filter::Cmd);
+    engine.add(Box::new(MediaProvider), Filter::Cmd);
     engine.add(Box::new(AppsProvider::new()), Filter::Apps);
     engine.add(Box::new(FilesProvider::new()), Filter::Files);
+    // File power actions + recent files/downloads (keyword-gated).
+    engine.add(Box::new(FileActionsProvider), Filter::Files);
     engine.add(Box::new(BookmarksProvider::new()), Filter::Web);
     engine.add(
         Box::new(WebSearchProvider::new(config.web_search_url.clone())),

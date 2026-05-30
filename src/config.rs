@@ -109,6 +109,22 @@ model = "claude-3-5-sonnet-latest"
 # Optional base-URL override for "openai-compatible"/"gemini" proxies.
 endpoint = ""
 
+# Quick notes. Type "note <text>" to append a timestamped line to a plain-text
+# notes file; type "note" (or "notes") to open it. By default the file lives at
+# notes.txt in the support dir. Set `apple_notes = true` to also create a note in
+# Apple Notes on each capture (asks for Automation permission on first use).
+[notes]
+# file = "notes.txt"        # relative -> support dir; or an absolute path
+apple_notes = false
+
+# Date/time. The world clock ("time in Tokyo", "time in IST") knows common
+# cities and zone abbreviations out of the box. Add your own named zones here;
+# then "time in <name>" shows that zone (uses IANA identifiers).
+#
+# [[datetime.timezones]]
+# name = "HQ"
+# tz = "America/New_York"
+
 [ui]
 playful_placeholders = true
 critters = true
@@ -144,6 +160,8 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     pub window: WindowConfig,
     pub hotkeys: Vec<HotkeyConfig>,
+    pub notes: NotesConfig,
+    pub datetime: DateTimeConfig,
 }
 
 impl Default for Config {
@@ -160,8 +178,48 @@ impl Default for Config {
             clipboard: ClipboardConfig::default(),
             window: WindowConfig::default(),
             hotkeys: Vec::new(),
+            notes: NotesConfig::default(),
+            datetime: DateTimeConfig::default(),
         }
     }
+}
+
+/// Quick-note capture settings. Notes are appended to a plain-text file (the
+/// reliable default); optionally also mirrored into Apple Notes.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct NotesConfig {
+    /// Notes file. A relative path is resolved under the support dir; an
+    /// absolute path is used as-is. Empty = `notes.txt` in the support dir.
+    pub file: String,
+    /// Also create an Apple Notes note on each capture (asks for Automation).
+    pub apple_notes: bool,
+}
+
+/// Date/time settings. `timezones` adds custom world-clock entries usable as
+/// "time in <name>".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DateTimeConfig {
+    pub timezones: Vec<TimezoneConfig>,
+}
+
+impl DateTimeConfig {
+    /// Flatten into (name, tz) pairs for the provider.
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        self.timezones
+            .iter()
+            .map(|t| (t.name.clone(), t.tz.clone()))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TimezoneConfig {
+    /// Friendly name typed after "time in" (e.g. "HQ").
+    pub name: String,
+    /// IANA timezone identifier (e.g. "America/New_York").
+    pub tz: String,
 }
 
 /// A user-defined global hotkey: a key combo (modifiers + key) bound to an

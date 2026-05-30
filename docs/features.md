@@ -37,9 +37,9 @@ closes the panel. Tokens and the categories they map to:
 | `@apps` | Apps | App |
 | `@files` | Files | File |
 | `@clip` | Clipboard | Clip |
-| `@calc` | Calc / Conversions | Calc, Convert |
+| `@calc` | Calc / Conversions | Calc, Convert, Dev, Color, Time |
 | `@web` | Web | Web |
-| `@cmd` | Commands | Command, Quicklink, Snippet, System, Plugin, Proc, Window |
+| `@cmd` | Commands | Command, Quicklink, Snippet, System, Plugin, Proc, Window, Calendar, Reminders, Network, Notes, Dictionary, Media |
 | `@emoji` | Emoji | Emoji |
 | `@ai` | AI | AI |
 
@@ -92,15 +92,161 @@ Natural forms: `<amount> <from> in|to <to>`.
 currency_ttl_hours = 12   # how long cached rates are reused before refreshing
 ```
 
+## Developer tools
+
+Keyword-gated utilities; `Enter` copies the output to the clipboard. Everything
+is hand-rolled (or uses `serde_json` for JSON), so there is no network and no
+new dependency.
+
+| Keyword(s) | Example | Result |
+| --- | --- | --- |
+| `base64` / `b64` | `base64 hello` | Base64-encode the text |
+| `base64 decode` / `base64d` | `base64d aGVsbG8=` | Base64-decode |
+| `urlencode` / `urldecode` | `urlencode a b&c` | Percent-encode / decode |
+| `md5`, `sha1`, `sha256` | `sha256 hello` | Hex digest of the text |
+| `uuid` | `uuid` | Random UUID v4 |
+| `password <len>` / `pass` | `password 24` | Random password (default 20, 4–256) |
+| `lorem <n>` | `lorem 30` | Lorem-ipsum (n words, default 40) |
+| `json <text>` | `json {"a":1}` | Pretty-print JSON |
+| `jsonmin <text>` | `jsonmin { "a": 1 }` | Minify JSON |
+
+## Color, number-base & timestamp converters
+
+- **Color:** `#RRGGBB`, `#RGB`, `0xRRGGBB`, `rgb(r,g,b)`, or a named color
+  (`red`, `navy`, `teal`, …). Shows a swatch (a tiny BMP rendered under the
+  support dir) plus the HEX / RGB / HSL representations; `Enter` copies HEX (the
+  RGB and HSL rows copy their own value). Explicit forms rank high; bare color
+  names rank modestly so they never bury app results.
+- **Number base:** `<number> to dec|hex|bin|oct`. The input may be decimal or
+  `0x` / `0b` / `0o` prefixed: `0x1f to dec`, `255 to hex`, `0b1010 to oct`.
+- **Epoch / timestamp:** `epoch <n>` (or `timestamp`/`unix`) converts a Unix time
+  to local + UTC (13-digit values are treated as milliseconds); `now epoch`
+  prints the current Unix time. Uses the built-in `date` CLI for correct local
+  time and DST.
+
+## Date & time
+
+- **World clock:** `time in <place>` for common cities (`time in Tokyo`,
+  `time in London`) and zone abbreviations (`time in IST`, `time in PST`,
+  `time in UTC`). Uses the built-in `date` CLI with a `TZ` override, so DST is
+  handled correctly. Add your own named zones in `[datetime]` (below).
+- **Date math:** `days until 25 Dec`, `days since 2020-01-01`, `today+30d`,
+  `now-2w`. Hand-rolled with a civil-days algorithm (no `chrono`).
+- **Timers:** `timer 5m`, `timer 30s`, `timer 1h30m`, optionally with a label
+  (`timer 10m tea`). `Enter` starts a detached `sleep` that fires an
+  `osascript` notification when elapsed — it never blocks the UI.
+
+```toml
+[[datetime.timezones]]
+name = "HQ"
+tz = "America/New_York"     # IANA identifier; used by "time in HQ"
+```
+
 ## System commands
 
-Fuzzy-search by name: `Lock Screen`, `Sleep`, `Sleep Displays`,
-`Toggle Dark Mode`, `Empty Trash`, `Restart`, `Shut Down`, `Toggle Wi-Fi`, and
-`Toggle Bluetooth` (only when `blueutil` is installed). Destructive commands
-(Empty Trash, Restart, Shut Down) require a second `Enter` to confirm.
+Fuzzy-search by name. Built-ins:
 
-Permissions: lock/sleep/Wi-Fi need none; dark mode/trash/restart/shutdown use
-AppleScript and prompt for **Automation** on first use.
+- **Power/session:** `Lock Screen`, `Sleep`, `Sleep Displays`, `Empty Trash`,
+  `Restart`, `Shut Down` (the last three require a second `Enter` to confirm).
+- **Appearance:** `Toggle Dark Mode`.
+- **Volume:** `Volume Up`, `Volume Down`, `Mute`, `Unmute`, and `volume <0-100>`
+  / `set volume <n>` to set a level (via `set volume`).
+- **Wi-Fi:** `Toggle Wi-Fi`, `Wi-Fi On`, `Wi-Fi Off` (via `networksetup`).
+- **Bluetooth:** `Toggle Bluetooth`, `Bluetooth On/Off` — only when the optional
+  `blueutil` helper is installed (no permission-free CLI otherwise).
+- **Brightness:** `Brightness Up/Down` and `brightness <0-100>` — only when the
+  optional `brightness` helper is installed.
+- **Caffeinate:** `Caffeinate` keeps the Mac awake (spawns `caffeinate`);
+  `Decaffeinate` stops it.
+- **Disks:** `Eject All Disks`.
+- **Focus:** `Toggle Do Not Disturb` — best-effort; runs a Shortcut named
+  "Toggle Do Not Disturb" if you have created one (modern macOS has no stable
+  scriptable Focus API), and degrades to a no-op otherwise.
+
+Permissions: lock/sleep/volume/Wi-Fi/caffeinate need none; dark mode / trash /
+restart / shutdown / eject use AppleScript and prompt for **Automation** on
+first use. Bluetooth and brightness degrade gracefully when their helper CLIs
+are absent.
+
+## File power actions & recent files
+
+Keyword-gated, so the disk is only scanned on demand:
+
+| Keyword | Effect |
+| --- | --- |
+| `recent` | Recently modified files across Desktop / Downloads / Documents |
+| `downloads` / `dls` | Newest items in `~/Downloads` |
+| `reveal <path>` | Reveal in Finder (`open -R`) |
+| `ql <path>` / `quicklook` | Quick Look preview (`qlmanage -p`) |
+| `copypath <path>` | Copy the POSIX path to the clipboard |
+| `folder <path>` | Open the enclosing folder |
+
+Recent/download rows open the file on `Enter`. Paths accept `~` expansion.
+
+## Calendar & reminders
+
+AppleScript bridges to Calendar and Reminders (no entitlement-heavy linking).
+macOS prompts for **Automation** permission on first use.
+
+| Keyword | Effect |
+| --- | --- |
+| `today` / `agenda` | List today's calendar events (cached briefly) |
+| `remind <text> [at <time>]` | Quick-add a reminder (`remind buy milk at 5pm`) |
+| `event <text> [at <time>]` | Quick-add a 1-hour calendar event (`event Lunch at 1pm`) |
+
+Listing today's events shells out to Calendar (slow), so results are cached for
+~2 minutes; create actions only run on `Enter`. Times accept `5pm`, `5:30pm`,
+`17:00`, `9am`.
+
+## Network info
+
+Keyword-gated; nothing runs on the default path.
+
+| Keyword | Effect |
+| --- | --- |
+| `ip` / `localip` | Local IP (`ipconfig getifaddr en0`, with en1/en2 fallback) |
+| `myip` / `public ip` | Public IP via a single HTTP GET (no polling), cached ~5 min |
+| `ports` / `listening` | Listening TCP ports (`lsof -nP -iTCP -sTCP:LISTEN`) |
+| `port <n>` | What's listening on a specific port |
+| `wifi networks` / `networks` | Preferred Wi-Fi networks (`networksetup`) |
+
+The public-IP lookup is bounded by a hard 5-second timeout so it can never hang
+the worker thread. `Enter` copies the relevant value (IP, port, network name).
+
+## Quick notes
+
+`note <text>` appends a timestamped line to a plain-text notes file; `note` or
+`notes` (no argument) opens that file. Optionally mirror each capture into Apple
+Notes.
+
+```toml
+[notes]
+# file = "notes.txt"     # relative -> support dir; or an absolute path
+apple_notes = false      # also create an Apple Notes note (asks for Automation)
+```
+
+## Dictionary & spell
+
+- `define <word>` shows an inline definition via the macOS **Dictionary
+  Services** (through `python3`/PyObjC) when reachable, and always offers a
+  "Look up in Dictionary" row that opens Dictionary.app via the `dict://` scheme.
+- `spell <word>` checks the system word list (`/usr/share/dict/words`) and, when
+  the word isn't found, suggests the nearest matches by edit distance.
+
+No network. Definitions are cached per word; the word list loads once on first
+use.
+
+## Media controls
+
+Control the active player (Spotify or Music) via AppleScript when one is
+running; the action is a graceful no-op if neither is. Keyword-gated.
+
+| Keyword(s) | Effect |
+| --- | --- |
+| `play` / `resume`, `pause` | Play / play-pause |
+| `next` / `next track` / `skip` | Next track |
+| `prev` / `previous` / `back` | Previous track |
+| `now playing` / `track` | Show the current track (`Enter` copies it) |
 
 ## Emoji & symbol picker
 
