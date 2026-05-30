@@ -31,7 +31,10 @@ so it stays fast and lean.
 - Web-search fallback (opens the default browser).
 - Clipboard history with pins and text/link/image types (the `clip` keyword).
 - Browser bookmark/history search (`bm` / `hist`) for Chrome, Brave, Edge, Chromium, Vivaldi.
-- User-defined custom commands + an external [plugin protocol](docs/plugins.md).
+- Process manager (`kill` / `ps`) - confirm-then-SIGTERM your own processes.
+- Window management (opt-in; needs Accessibility) - snap/resize the frontmost window with `win`.
+- User-defined custom commands (with aliases) + an external [plugin protocol](docs/plugins.md).
+- Custom global hotkeys - bind any combo to open a URL, run a shell command, or fire a named command.
 - AI query (Anthropic Claude / OpenAI / Google Gemini / any OpenAI-compatible endpoint), with API keys stored in the macOS Keychain.
 - Multi-turn AI follow-up chat and quick AI commands (translate / summarize / fix grammar / improve).
 - Screenshot capture sent to an AI vision model.
@@ -41,6 +44,11 @@ so it stays fast and lean.
 
 - `Option + Space` - toggle the launcher panel.
 - `Option + Shift + Space` - capture a screen region and ask the AI about it.
+
+You can also define your own global hotkeys in the config via `[[hotkeys]]` (see
+[Custom global hotkeys](docs/features.md#custom-global-hotkeys) for the combo
+syntax), each bound to open a URL/app, run a shell command, or fire a named
+command — without opening the panel.
 
 ## Usage
 
@@ -57,6 +65,8 @@ Open the panel and start typing:
 - Use a quicklink keyword with an argument (e.g. `ghr rust-lang/rust`).
 - Type `clip` to browse clipboard history (`clip foo` to filter; `clip pin <n>` to pin). Links open, images re-copy.
 - Type `bm <query>` to search browser bookmarks, or `hist <query>` for browser history.
+- Type `kill` or `ps` (optionally `kill safari`) to list processes; `Enter`, then `Enter` again, sends SIGTERM.
+- Enable `[window] enabled = true`, then type `win` (e.g. `win left`, `win max`) to snap the frontmost window (needs Accessibility).
 - Type `? your question` to ask the configured AI backend, then keep typing to continue the chat (Esc exits chat).
 - Quick AI commands: `translate`/`tr`, `summarize`/`sum`, `fixgrammar`/`fix`, `improve` (use an argument or the clipboard).
 - Type `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
@@ -113,9 +123,11 @@ A commented config file is created on first run at:
 ~/Library/Application Support/litecast/config.toml
 ```
 
-It controls the web-search URL, custom commands, quicklinks, text snippets,
-unit/currency conversion, the AI backend (provider/model/endpoint), and UI
-toggles. Plugins go in `.../litecast/plugins/` (see [docs/plugins.md](docs/plugins.md)),
+It controls the web-search URL, custom commands (with `alias`/`aliases`),
+quicklinks, text snippets, unit/currency conversion, the AI backend
+(provider/model/endpoint), opt-in window management (`[window] enabled`),
+custom global hotkeys (`[[hotkeys]]`), and UI toggles. Plugins go in
+`.../litecast/plugins/` (see [docs/plugins.md](docs/plugins.md)),
 and wandering-critter GIFs go in `.../litecast/critters/`. The support dir also
 holds learned usage (`usage.json`) and cached currency rates (`currency.json`).
 
@@ -131,10 +143,19 @@ if the optional [`blueutil`](https://github.com/toy/blueutil) CLI is installed.
 
 ## Permissions
 
-- Global hotkeys use Carbon and need **no** Accessibility permission.
+- Global hotkeys (built-in and custom `[[hotkeys]]`) use Carbon and need **no**
+  Accessibility permission.
 - The screenshot feature uses the built-in `screencapture`, which requires the
   **Screen Recording** permission (macOS prompts on first use).
 - The AI feature needs outbound network access.
+- **Window management is the only feature that needs Accessibility, and it is
+  off by default.** Set `[window] enabled = true` to surface the `win` commands;
+  the first time you run one, macOS prompts you to grant litecast access under
+  **System Settings › Privacy & Security › Accessibility**. litecast never
+  prompts for Accessibility unless you both enable the section and trigger a
+  window command, and it stays fully functional if you never grant it.
+- The process manager (`kill` / `ps`) only touches your own user's processes and
+  needs no permission.
 
 ## Build & run
 

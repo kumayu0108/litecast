@@ -29,7 +29,7 @@ map to:
 | `@clip` | Clipboard | Clip |
 | `@calc` | Calc / Conversions | Calc, Convert |
 | `@web` | Web | Web |
-| `@cmd` | Commands | Command, Quicklink, Snippet, System, Plugin |
+| `@cmd` | Commands | Command, Quicklink, Snippet, System, Plugin, Proc, Window |
 | `@emoji` | Emoji | Emoji |
 | `@ai` | AI | AI |
 
@@ -112,18 +112,109 @@ text = "1 Main St, Springfield"
 paste = false             # paste-on-Enter copies to the clipboard
 ```
 
+## Custom commands & aliases
+
+`[[commands]]` add fuzzy-searchable results. Each has a `name`, a `kind`
+(`"open"` for a file/URL/app or `"shell"` for a `sh -c` command), and a
+`target`. An optional `keyword` triggers it directly (and, if `target` contains
+`{}`, substitutes the text typed after the keyword).
+
+Optional `alias` (one term) and/or `aliases` (a list) are extra search terms
+folded into name matching, so a short token surfaces the command without
+changing its display name:
+
+```toml
+[[commands]]
+name = "Open GitHub"
+keyword = "gh"
+alias = "git"
+aliases = ["hub", "repo"]
+kind = "open"
+target = "https://github.com/{}"
+```
+
 ## Quicklinks
 
 Parameterized URLs opened in the browser. Trigger with the keyword plus an
-argument (URL-encoded into `{query}`), or fuzzy-match the name to open with no
-argument.
+argument (URL-encoded into `{query}`), or fuzzy-match the name (or any `alias`)
+to open with no argument.
 
 ```toml
 [[quicklinks]]
 name = "GitHub repo"
 keyword = "ghr"
+alias = "repo"
 url = "https://github.com/{query}"
 ```
+
+## Custom global hotkeys
+
+`[[hotkeys]]` register additional system-wide hotkeys alongside the built-in
+`Option+Space` (toggle) and `Option+Shift+Space` (screenshot). Each binds a key
+combo to an action that fires directly, without opening the panel.
+
+**Combo syntax:** modifiers and a key joined by `+`, e.g. `Cmd+Shift+S`.
+
+- Modifiers: `Cmd` (aliases `Command`/`Super`/`Win`/`Meta`), `Ctrl`
+  (`Control`), `Alt` (`Option`/`Opt`), `Shift`. At least one is required.
+- Key: a letter `A`-`Z`, a digit `0`-`9`, `F1`-`F12`, `Space`, `Enter`, `Tab`,
+  `Esc`, an arrow (`Up`/`Down`/`Left`/`Right`), or common punctuation
+  (`,` `.` `/` `-` `=` `;` `'` `` ` `` `\` `[` `]`).
+
+**Action kinds:**
+
+| `kind` | `target` is | Effect |
+| --- | --- | --- |
+| `open` | a URL / path / app | opened via `open` |
+| `shell` | a shell command | run via `sh -c` |
+| `command` | the `name` of a `[[commands]]` entry | runs that command's action |
+
+```toml
+[[hotkeys]]
+key = "Cmd+Shift+G"
+kind = "open"
+target = "https://github.com"
+
+[[hotkeys]]
+key = "Ctrl+Alt+T"
+kind = "shell"
+target = "open -a Terminal"
+```
+
+Registration is best-effort: if a combo is unparseable or already claimed by
+another app, litecast logs it and carries on (the rest of the app is unaffected).
+
+## Process manager
+
+Type `kill` or `ps` (optionally with a filter, e.g. `kill safari`) to list your
+running processes by name, PID, and %CPU. The provider is keyword-gated, so it
+never runs `ps` unprompted. `Enter` arms a two-step confirmation
+("Press Enter again to kill <name> (pid …)"); a second `Enter` sends **SIGTERM**
+(graceful). Critical system processes (`WindowServer`, `loginwindow`, `Finder`,
+litecast itself, …) are hidden to avoid foot-guns. No permissions required;
+only your own user's processes are listed.
+
+## Window management (opt-in, needs Accessibility)
+
+**Off by default.** This is the one litecast feature that needs the macOS
+**Accessibility** permission, so it is gated behind config and stays inert until
+you opt in:
+
+```toml
+[window]
+enabled = true
+```
+
+With it enabled, type `win` (e.g. `win left`, `win max`) to move/resize the
+**frontmost app's** focused window: Left/Right/Top/Bottom Half, Left/Right
+Third, Center Two-Thirds, Maximize, Center, and Next/Previous Display.
+
+The first time you run a window command, macOS prompts you to grant litecast
+access under **System Settings › Privacy & Security › Accessibility**. Nothing
+runs or prompts until you both enable the section and trigger a command; if
+access is denied, litecast shows a row that opens the right Settings pane
+instead of failing silently. litecast remains fully functional with
+Accessibility never granted.
 
 ## Clipboard history
 

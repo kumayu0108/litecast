@@ -11,22 +11,58 @@ web_search_url = "https://www.google.com/search?q={}"
 
 # Custom commands. Each appears as a result you can fuzzy-search by name, or
 # trigger directly by typing its optional keyword. If `target` contains {} and
-# a keyword is set, the text after the keyword is substituted in.
+# a keyword is set, the text after the keyword is substituted in. Optional
+# `alias`/`aliases` are extra search terms folded into name matching, so a short
+# token can surface the command (e.g. typing "gh" finds "Open GitHub").
 #
 # [[commands]]
 # name = "Open GitHub"
 # keyword = "gh"
+# alias = "git"                       # one extra search term
+# aliases = ["hub", "repo"]           # or several
 # kind = "open"                       # "open" (file/url/app) or "shell"
 # target = "https://github.com/{}"
 
 # Quicklinks: parameterized URLs opened in your browser. Type the keyword plus
 # an argument (e.g. "ghr rust-lang/rust"); {query} is URL-encoded and
-# substituted. Without an argument, the link is fuzzy-matched by name.
+# substituted. Without an argument, the link is fuzzy-matched by name (or by any
+# alias).
 #
 # [[quicklinks]]
 # name = "GitHub repo"
 # keyword = "ghr"
+# alias = "repo"
 # url = "https://github.com/{query}"
+
+# Process manager. Type "kill" or "ps" (optionally with a filter, e.g.
+# "kill safari") to list your running processes by name, pid, and %CPU. Enter
+# asks you to confirm ("Press Enter again to kill <name> (pid)") and then sends
+# SIGTERM (graceful). Critical system processes are hidden to avoid foot-guns.
+# No configuration or permissions are required; nothing runs until you type the
+# keyword.
+
+# Custom global hotkeys. Each binds a key combo to an action, registered system
+# wide alongside the built-in Option+Space (toggle) and Option+Shift+Space
+# (screenshot) hotkeys. Combo syntax: modifiers + a key joined by "+", e.g.
+# "Cmd+Shift+S". Modifiers: Cmd (or Command/Super/Win), Ctrl, Alt (or Option),
+# Shift. Keys: letters A-Z, digits 0-9, F1-F12, Space, Enter, Tab, Esc, arrow
+# keys (Up/Down/Left/Right), and common punctuation. At least one modifier is
+# required. Registration failures (e.g. a combo already taken by another app)
+# are logged and ignored.
+#
+# kind = "open"   -> target is a URL/path/app opened via `open`
+# kind = "shell"  -> target is a shell command run via `sh -c`
+# kind = "command"-> target is the name of a [[commands]] entry above
+#
+# [[hotkeys]]
+# key = "Cmd+Shift+G"
+# kind = "open"
+# target = "https://github.com"
+#
+# [[hotkeys]]
+# key = "Ctrl+Alt+T"
+# kind = "shell"
+# target = "open -a Terminal"
 
 # Reusable text snippets. List them with the "snip" keyword (or "snip <filter>"),
 # or surface one directly via its own keyword. Enter copies the expanded text to
