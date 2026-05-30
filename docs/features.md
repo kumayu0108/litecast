@@ -8,7 +8,7 @@ these to an existing config is backward compatible.
 
 Scope results to a single category three interchangeable ways:
 
-- **Clickable chips (Spotlight-style):** a horizontal row of category chips
+- **Clickable chips:** a horizontal row of category chips
   (`All  Apps  Files  Clipboard  Calc  Web  Commands  Emoji  AI`) sits in its own
   band directly under the search field. Click a chip to activate that filter; the
   active chip is highlighted as an accent pill, the rest are subtle but clearly
@@ -20,6 +20,12 @@ Scope results to a single category three interchangeable ways:
 - **Tab cycle:** press **Tab** to move the highlight forward along the chip row
   (`All -> Apps -> Files -> Clipboard -> Calc -> Web -> Commands -> Emoji -> AI -> All`)
   and **Shift+Tab** to move backward.
+
+While you are still typing an `@token` (before the first space), litecast shows
+an autocomplete list of the available shortcuts (these category filters plus any
+app commands). The nearest match appears as an inline ghost in the field; press
+**Tab** to accept it. Once an `@token` is being completed, **Tab** accepts the
+suggestion; otherwise **Tab** cycles the filter as below.
 
 All three drive the same active filter and stay in sync: clicking a chip, typing
 a prefix, and Tab-cycling each update the highlighted chip and re-run the query.
@@ -135,6 +141,34 @@ alias = "git"
 aliases = ["hub", "repo"]
 kind = "open"
 target = "https://github.com/{}"
+```
+
+## App commands (`@keyword`)
+
+`@`-namespaced actions that take a free-text argument. Type `@` to open the
+autocomplete list of available shortcuts (category filters and app commands),
+fuzzy-match the keyword, and press **Tab** (or **Enter**) to accept the nearest
+match. The nearest match is also shown as an inline ghost in the search field.
+After accepting, type an argument and press **Enter** to run.
+
+Built-ins (no AI, no config required):
+
+| Keyword | Action |
+| --- | --- |
+| `@term <command>` | Open Terminal.app and run the command (empty = just open Terminal) |
+| `@finder <path>` | Open a path/folder in Finder (empty = home) |
+| `@safari <url-or-query>` | Open a URL, or web-search the text, in your default browser |
+
+Define your own in `[[app_commands]]`. `{query}` (or `{arg}`) is replaced with
+the text typed after the keyword; a user entry reusing a built-in keyword
+overrides it.
+
+```toml
+[[app_commands]]
+keyword = "ed"
+name = "Edit in editor"
+kind = "shell"          # "terminal" | "shell" | "applescript" | "open"
+template = "code {query}"
 ```
 
 ## Quicklinks

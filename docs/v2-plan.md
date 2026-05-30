@@ -1,8 +1,7 @@
 # litecast v2 design plan
 
-Goal: add power features that beat Spotlight and approach Raycast Pro, while
-keeping litecast lightweight, native (AppKit via `objc2`), keyboard-first, and
-dependency-minimal.
+Goal: add powerful launcher features while keeping litecast lightweight, native
+(AppKit via `objc2`), keyboard-first, and dependency-minimal.
 
 This document is grounded in the current architecture:
 
@@ -329,7 +328,7 @@ separate `snippets.toml`). Each snippet → `Item` with `Action::Paste(text)` (o
 **(d) Permissions.** Paste-on-Enter (copy only): none. Auto Cmd+V or inline
 expansion: Accessibility.
 
-**(e) Tradeoffs/risks.** Inline expansion is where Raycast/TextExpander spend
+**(e) Tradeoffs/risks.** Inline expansion is where text-expansion tools spend
 real engineering (per-app quirks, undo, password fields); not worth the AX cost
 and risk for v2. Placeholders keep it cheap and useful. `{clipboard}` reads the
 current pasteboard at activation time.

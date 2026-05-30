@@ -1,6 +1,6 @@
 # litecast
 
-A super-lightweight, native Spotlight/Raycast-style launcher for macOS, written in Rust.
+A super-lightweight, native keyboard launcher for macOS, written in Rust.
 
 litecast runs as a background menu-bar / accessory app (no Dock icon) and pops up a
 borderless search panel on a global hotkey. It is built directly on AppKit via
@@ -19,7 +19,7 @@ so it stays fast and lean.
 - Global hotkey to toggle the search panel.
 - Recents on open - an empty query shows this session's recent activity and last AI answer (in-memory, never persisted).
 - Fuzzy app launcher.
-- File search (backed by the macOS Spotlight index via `mdfind`).
+- File search (backed by the macOS file index via `mdfind`).
 - Category filters - scope results by clicking a chip, typing an `@` prefix, or cycling with Tab.
 - Frecency ranking - frequently and recently used items drift to the top.
 - Inline calculator (hand-rolled evaluator).
@@ -34,6 +34,7 @@ so it stays fast and lean.
 - Process manager (`kill` / `ps`) - confirm-then-SIGTERM your own processes.
 - Window management (opt-in; needs Accessibility) - snap/resize the frontmost window with `win`.
 - User-defined custom commands (with aliases) + an external [plugin protocol](docs/plugins.md).
+- App commands - `@keyword` actions that take a free-text argument (`@term`, `@finder`, `@safari`, plus your own), with `@`-autocomplete and Tab to accept.
 - Custom global hotkeys - bind any combo to open a URL, run a shell command, or fire a named command.
 - AI query (Anthropic Claude / OpenAI / Google Gemini / any OpenAI-compatible endpoint), with API keys stored in the macOS Keychain.
 - Multi-turn AI follow-up chat and quick AI commands (translate / summarize / fix grammar / improve).
@@ -106,7 +107,7 @@ provider's key. Then ask with `? your question`.
 
 Scope results to one category. Three ways, all driving the same state:
 
-- **Click a chip:** a Spotlight-style row of category chips
+- **Click a chip:** a row of category chips
   (`All  Apps  Files  Clipboard  Calc  Web  Commands  Emoji  AI`) sits under the
   search bar. Click one to activate that filter; the active chip is highlighted.
 - **Prefixes:** `@apps`, `@files`, `@clip`, `@calc`, `@web`, `@cmd`, `@emoji`, `@ai`

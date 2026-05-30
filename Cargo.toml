@@ -2,7 +2,7 @@
 name = "litecast"
 version = "0.1.0"
 edition = "2021"
-description = "A super-lightweight Spotlight/Raycast-style launcher for macOS"
+description = "A super-lightweight keyboard launcher for macOS"
 license = "MIT"
 
 [dependencies]
