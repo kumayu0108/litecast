@@ -14,11 +14,13 @@ Scope results to a single category two interchangeable ways:
   scopes with an empty query.
 - **Tab chip:** press **Tab** to cycle the filter forward
   (`All -> Apps -> Files -> Clipboard -> Calc -> Web -> Commands -> Emoji -> AI -> All`)
-  and **Shift+Tab** to cycle backward. The active filter shows as a small pill in
-  the search area.
+  and **Shift+Tab** to cycle backward. A chip in the search area always shows the
+  state: a faint "⇥ Filter" hint when unfiltered, or the active category as an
+  accent pill.
 
-Both drive the same active filter. **Esc** clears an active filter first, then
-(when already on `All`) closes the panel. Tokens and the categories they map to:
+Both drive the same active filter. **Esc** exits AI chat first (if active), then
+clears an active filter, then closes the panel. Tokens and the categories they
+map to:
 
 | Token | Category | Includes (source labels) |
 | --- | --- | --- |
@@ -109,13 +111,63 @@ url = "https://github.com/{query}"
 
 ## Clipboard history
 
-`clip` lists recent clipboard entries; `clip foo` filters. `Enter` copies the
-entry back to the clipboard.
+`clip` lists recent clipboard entries; `clip foo` fuzzy-filters (pinned and
+unpinned). Entries are typed:
+
+- **Text** - `Enter` copies it back to the clipboard.
+- **Link** (http/https) - `Enter` opens it in the browser.
+- **Image** - copied images are captured and stored under the support dir
+  (`clip-images/`); the row shows a thumbnail and `Enter` re-copies the image.
+
+**Pinning:** each row shows a number. `clip pin <n>` pins entry `n` (it moves to
+the top, is marked `[pin]`, and survives eviction); `clip unpin <n>` removes the
+pin. Configure image capture and caps in `[clipboard]`:
+
+```toml
+[clipboard]
+keep_images = true
+max_images = 20
+```
+
+## Bookmarks & history
+
+Search Chromium-family browsers (Chrome, Brave, Edge, Chromium, Vivaldi):
+
+- `bm <query>` - fuzzy-search bookmarks (parsed from each profile's `Bookmarks`
+  JSON; no permission needed).
+- `hist <query>` - fuzzy-search browser history (read via the system `sqlite3`;
+  the locked DB is copied first). Cached for a few minutes.
+
+`Enter` opens the URL. Both keyword-gated, so nothing touches disk unprompted.
+Safari is not supported (its data requires Full Disk Access).
 
 ## AI
 
 `? <question>` asks the configured backend (only on `Enter`). `Option+Shift+Space`
 captures a screen region to ask about it (vision).
+
+### Follow-up chat
+
+After an answer, the panel enters chat mode (the placeholder shows "Follow up,
+or press Esc to exit chat..."). Keep typing and press `Enter` to continue the
+conversation with full prior context; the latest answer stays visible for
+reference. `Esc` exits chat. The transcript resets when you dismiss the panel or
+start a fresh `?` question.
+
+### Quick AI commands
+
+Act on a typed argument, or with no argument on the latest clipboard text:
+
+| Keyword(s) | Action |
+| --- | --- |
+| `translate`, `tr` | Translate to English |
+| `summarize`, `sum` | Summarize |
+| `fixgrammar`, `fix` | Fix spelling/grammar |
+| `improve`, `rewrite` | Improve writing |
+
+Example: `fix this sentance has typos` or just `summarize` (uses the clipboard).
+These are also fuzzy-discoverable by name and reuse the AI flow (answers are
+copyable, and follow-up chat continues from them).
 
 ### Providers
 

@@ -28,9 +28,11 @@ so it stays fast and lean.
 - Text snippets (the `snip` keyword).
 - Quicklinks - parameterized `{query}` URLs.
 - Web-search fallback (opens the default browser).
-- Clipboard history (the `clip` keyword).
+- Clipboard history with pins and text/link/image types (the `clip` keyword).
+- Browser bookmark/history search (`bm` / `hist`) for Chrome, Brave, Edge, Chromium, Vivaldi.
 - User-defined custom commands + an external [plugin protocol](docs/plugins.md).
 - AI query (Anthropic Claude / OpenAI / Google Gemini / any OpenAI-compatible endpoint), with API keys stored in the macOS Keychain.
+- Multi-turn AI follow-up chat and quick AI commands (translate / summarize / fix grammar / improve).
 - Screenshot capture sent to an AI vision model.
 - Small, opt-out UI delights (playful placeholders, fade-in, easter eggs, wandering critters).
 
@@ -51,8 +53,10 @@ Open the panel and start typing:
 - Type `emoji fire` or `:fire` to find and copy an emoji/symbol.
 - Type `snip` to browse text snippets (or a snippet's own keyword); `Enter` copies it.
 - Use a quicklink keyword with an argument (e.g. `ghr rust-lang/rust`).
-- Type `clip` to browse clipboard history (`clip foo` to filter).
-- Type `? your question` to ask the configured AI backend.
+- Type `clip` to browse clipboard history (`clip foo` to filter; `clip pin <n>` to pin). Links open, images re-copy.
+- Type `bm <query>` to search browser bookmarks, or `hist <query>` for browser history.
+- Type `? your question` to ask the configured AI backend, then keep typing to continue the chat (Esc exits chat).
+- Quick AI commands: `translate`/`tr`, `summarize`/`sum`, `fixgrammar`/`fix`, `improve` (use an argument or the clipboard).
 - Type `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
 - Anything else offers a web search.
 
