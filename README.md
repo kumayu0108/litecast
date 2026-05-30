@@ -193,9 +193,26 @@ open target/litecast.app
 
 Requires a recent stable Rust toolchain (1.85+) and macOS 11+.
 
-Because the app is not codesigned/notarized yet, Gatekeeper will block the first
-launch. Right-click `litecast.app` and choose **Open**, then confirm. (Signing
-and notarization are planned for a later milestone.)
+Because the app is not notarized, Gatekeeper will block the first launch.
+Right-click `litecast.app` and choose **Open**, then confirm.
+
+### Keychain prompts & code signing
+
+litecast stores AI API keys in the macOS Keychain, and the Keychain ties an
+"Always Allow" decision to the calling binary's **code identity**.
+
+- **Bundled app (`./scripts/bundle.sh`):** the build ad-hoc-signs the `.app`
+  with a *stable* identifier (`com.litecast.app`), so its code identity is the
+  same on every launch. The first time it reads your API key you'll get one
+  Keychain prompt — click **Always Allow** and it won't ask again.
+- **`cargo run` (dev):** each dev build produces a freshly-signed binary with a
+  new code identity, so macOS treats it as a different app and **re-prompts**
+  every launch. This is expected; use the bundled app for a prompt-free
+  experience.
+
+If you ever want to reset the decision, open **Keychain Access**, find the
+`litecast` item, and remove litecast from its **Access Control** list (or delete
+the item to re-enter the key with `setkey`).
 
 ## License
 

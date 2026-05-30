@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      litecast is not sandboxed (it shells out to system tools and reads the
+      file index). These entitlements are best-effort hints for a consistent
+      code identity; the bundle remains functional even if signing strips them.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <!-- Allow outbound network for the optional AI feature. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
