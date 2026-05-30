@@ -1,5 +1,5 @@
 use crate::config::QuicklinkConfig;
-use crate::engine::{fuzzy_score, Provider};
+use crate::engine::{fuzzy_score, keyword_matches, Provider};
 use crate::model::{Action, Item};
 use crate::providers::websearch::percent_encode;
 
@@ -46,12 +46,14 @@ impl Provider for QuicklinksProvider {
     }
 }
 
-/// If `q` is exactly the keyword or starts with "keyword ", returns the argument.
+/// If `q`'s first word matches the keyword (exactly or within a small typo
+/// tolerance), returns the remaining argument text.
 fn match_keyword<'a>(q: &'a str, keyword: &str) -> Option<&'a str> {
-    if q == keyword {
-        return Some("");
-    }
-    q.strip_prefix(&format!("{keyword} ")).map(|rest| rest.trim())
+    let (first, rest) = match q.split_once(char::is_whitespace) {
+        Some((f, r)) => (f, r.trim()),
+        None => (q, ""),
+    };
+    keyword_matches(first, keyword).then_some(rest)
 }
 
 fn build_item(link: &QuicklinkConfig, arg: &str, score: i64) -> Item {

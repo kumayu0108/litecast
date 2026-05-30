@@ -1,5 +1,5 @@
 use crate::config::CommandConfig;
-use crate::engine::{fuzzy_score, Provider};
+use crate::engine::{fuzzy_score, keyword_matches, Provider};
 use crate::model::{Action, Item};
 
 /// User-defined custom commands from the config file. Triggered by fuzzy name
@@ -44,13 +44,15 @@ impl Provider for CommandsProvider {
     }
 }
 
-/// If `q` is exactly the keyword or starts with "keyword ", returns the argument.
+/// If `q`'s first word matches the keyword (exactly or within a small typo
+/// tolerance), returns the remaining argument text. So `gh` and a close typo
+/// both trigger the command, with or without an argument.
 fn match_keyword<'a>(q: &'a str, keyword: &str) -> Option<&'a str> {
-    if q == keyword {
-        return Some("");
-    }
-    let prefix = format!("{keyword} ");
-    q.strip_prefix(&prefix).map(|rest| rest.trim())
+    let (first, rest) = match q.split_once(char::is_whitespace) {
+        Some((f, r)) => (f, r.trim()),
+        None => (q, ""),
+    };
+    keyword_matches(first, keyword).then_some(rest)
 }
 
 fn build_item(cmd: &CommandConfig, arg: &str, score: i64) -> Item {

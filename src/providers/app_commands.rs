@@ -1,5 +1,5 @@
 use crate::config::AppCommandConfig;
-use crate::engine::Provider;
+use crate::engine::{keyword_matches, Provider};
 use crate::model::{osascript_action_with_args, Action, Item};
 use crate::providers::websearch::percent_encode;
 
@@ -36,10 +36,23 @@ impl Provider for AppCommandsProvider {
             None => (rest, ""),
         };
         let token = token.to_ascii_lowercase();
-        for cmd in &self.commands {
-            if cmd.keyword.eq_ignore_ascii_case(&token) {
-                out.push(self.build_item(cmd, arg));
-            }
+        // Exact keyword matches first; if none, fall back to a small typo
+        // tolerance so `@trm` still reaches `@term`.
+        let exact: Vec<&AppCommandConfig> = self
+            .commands
+            .iter()
+            .filter(|cmd| cmd.keyword.eq_ignore_ascii_case(&token))
+            .collect();
+        let matched: Vec<&AppCommandConfig> = if exact.is_empty() {
+            self.commands
+                .iter()
+                .filter(|cmd| keyword_matches(&token, &cmd.keyword))
+                .collect()
+        } else {
+            exact
+        };
+        for cmd in matched {
+            out.push(self.build_item(cmd, arg));
         }
     }
 }

@@ -56,19 +56,39 @@ impl Filter {
         }
     }
 
-    /// Map a typed `@token` (without the `@`) to a filter.
+    /// Map a typed `@token` (without the `@`) to a filter. Exact aliases match
+    /// first; otherwise a small typo tolerance lets `@aps`/`@clip`/`@emoij`
+    /// still resolve to the right category.
     pub fn from_token(token: &str) -> Option<Filter> {
         match token {
-            "apps" | "app" => Some(Filter::Apps),
-            "files" | "file" => Some(Filter::Files),
-            "clip" | "clipboard" => Some(Filter::Clip),
-            "calc" | "conv" | "convert" => Some(Filter::Calc),
-            "web" => Some(Filter::Web),
-            "cmd" | "command" | "commands" => Some(Filter::Cmd),
-            "emoji" => Some(Filter::Emoji),
-            "ai" => Some(Filter::Ai),
-            _ => None,
+            "apps" | "app" => return Some(Filter::Apps),
+            "files" | "file" => return Some(Filter::Files),
+            "clip" | "clipboard" => return Some(Filter::Clip),
+            "calc" | "conv" | "convert" => return Some(Filter::Calc),
+            "web" => return Some(Filter::Web),
+            "cmd" | "command" | "commands" => return Some(Filter::Cmd),
+            "emoji" => return Some(Filter::Emoji),
+            "ai" => return Some(Filter::Ai),
+            _ => {}
         }
+        // Typo-tolerant fallback against each category's canonical alias.
+        const ALIASES: &[(&str, Filter)] = &[
+            ("apps", Filter::Apps),
+            ("files", Filter::Files),
+            ("clip", Filter::Clip),
+            ("clipboard", Filter::Clip),
+            ("calc", Filter::Calc),
+            ("convert", Filter::Calc),
+            ("web", Filter::Web),
+            ("cmd", Filter::Cmd),
+            ("commands", Filter::Cmd),
+            ("emoji", Filter::Emoji),
+            ("ai", Filter::Ai),
+        ];
+        ALIASES
+            .iter()
+            .find(|(alias, _)| keyword_matches(token, alias))
+            .map(|(_, f)| *f)
     }
 }
 
@@ -130,6 +150,73 @@ impl Engine {
         out.truncate(self.max_results);
         out
     }
+}
+
+/// Typo tolerance for a keyword of `len` characters: roughly one edit per 4-5
+/// characters, capped low so matches stay tight (no edits for 1-2 char tokens).
+fn keyword_threshold(len: usize) -> usize {
+    match len {
+        0..=2 => 0,
+        3..=4 => 1,
+        _ => (len / 4).min(2),
+    }
+}
+
+/// Optimal String Alignment distance (Damerau-Levenshtein restricted to
+/// adjacent transpositions) between two ASCII-lowercased strings, with an early
+/// bound: returns `None` as soon as the best possible distance exceeds `max`.
+/// Bounded and tiny (keywords are short), so it is cheap to call per keystroke.
+fn osa_distance_within(a: &str, b: &str, max: usize) -> Option<usize> {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n.abs_diff(m) > max {
+        return None;
+    }
+    // Three rolling rows are enough for OSA (current, previous, prev-previous).
+    let mut prev2 = vec![0usize; m + 1];
+    let mut prev1: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        let mut row_min = cur[0];
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            let mut val = (prev1[j] + 1).min(cur[j - 1] + 1).min(prev1[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                val = val.min(prev2[j - 2] + 1);
+            }
+            cur[j] = val;
+            row_min = row_min.min(val);
+        }
+        if row_min > max {
+            return None;
+        }
+        std::mem::swap(&mut prev2, &mut prev1);
+        std::mem::swap(&mut prev1, &mut cur);
+    }
+    let dist = prev1[m];
+    (dist <= max).then_some(dist)
+}
+
+/// Does `input` match `keyword` exactly or within a small, length-scaled edit
+/// distance? Both are compared case-insensitively. Used so command/app-command
+/// keywords and category tokens tolerate typos (e.g. `cliboard`, `@trm`,
+/// `defien`) without loosening the precise fuzzy ranking of files/apps.
+pub fn keyword_matches(input: &str, keyword: &str) -> bool {
+    if input.eq_ignore_ascii_case(keyword) {
+        return true;
+    }
+    let max = keyword_threshold(keyword.chars().count());
+    if max == 0 {
+        return false;
+    }
+    osa_distance_within(
+        &input.to_ascii_lowercase(),
+        &keyword.to_ascii_lowercase(),
+        max,
+    )
+    .is_some()
 }
 
 /// Convenience fuzzy scorer used by providers. Builds a matcher per call, which
