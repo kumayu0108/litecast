@@ -40,7 +40,8 @@ use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
     AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, EasterEggProvider,
-    FilesProvider, PluginProvider, SnippetsProvider, SystemProvider, WebSearchProvider,
+    EmojiProvider, FilesProvider, PluginProvider, SnippetsProvider, SystemProvider,
+    WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -1026,6 +1027,7 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     engine.add(Box::new(EasterEggProvider));
     engine.add(Box::new(AiProvider::new(config.ai.clone())));
     engine.add(Box::new(CalcProvider));
+    engine.add(Box::new(EmojiProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
     engine.add(Box::new(SnippetsProvider::new(config.snippets.entries.clone())));
