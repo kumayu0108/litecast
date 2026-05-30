@@ -53,8 +53,8 @@ use providers::{
     CalcProvider, CalendarProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
     ConvertersProvider, DateTimeProvider, DevToolsProvider, DictionaryProvider, EasterEggProvider,
     EmojiProvider, FileActionsProvider, FilesProvider, MediaProvider, NetworkProvider,
-    NotesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, SnippetsProvider,
-    SystemProvider, WebSearchProvider, WindowProvider,
+    NotesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, ScriptsProvider,
+    SnippetsProvider, SystemProvider, WebSearchProvider, WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -2496,6 +2496,12 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     );
     engine.add(
         Box::new(SnippetsProvider::new(config.snippets.entries.clone())),
+        Filter::Cmd,
+    );
+    // Script commands: executable scripts in the watched dir, parsed lazily and
+    // cached (re-scanned only when the directory's mtime changes).
+    engine.add(
+        Box::new(ScriptsProvider::new(&config.scripts.dir)),
         Filter::Cmd,
     );
     engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
