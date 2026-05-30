@@ -16,6 +16,9 @@ pub enum Action {
     /// Continue the current AI conversation with `prompt`, threading prior turns.
     /// Handled specially by the UI (async, keeps the panel open).
     AskAiFollowup { prompt: String },
+    /// Re-open the last AI interaction from the recents view, restoring its
+    /// transcript and re-entering follow-up chat. Handled specially by the UI.
+    ResumeAi,
     /// Toggle the pinned state of a clipboard entry (identified by its key:
     /// text or image path). Handled by the UI so it can refresh the list.
     TogglePin { key: String },
@@ -112,6 +115,7 @@ impl Action {
             // the panel open.
             Action::AskAi { .. } => false,
             Action::AskAiFollowup { .. } => false,
+            Action::ResumeAi => false,
             // Handled by the UI; never executed directly.
             Action::TogglePin { .. } => false,
             // Handled by the UI's two-step confirm flow; never executed directly.

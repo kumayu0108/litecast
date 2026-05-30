@@ -12,6 +12,7 @@ mod screenshot;
 mod secrets;
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Mutex};
 
 use global_hotkey::{
@@ -81,6 +82,8 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
 ];
 const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
+// Session-only recents ring buffer capacity (in-memory, reset on quit).
+const RECENTS_CAP: usize = 12;
 const ROW_ICON: f64 = 26.0;
 const CORNER_RADIUS: f64 = 20.0;
 // Shared left/right margin for the search field, separator, and result rows so
@@ -185,6 +188,15 @@ define_class!(
     }
 );
 
+/// Snapshot of the most recent AI interaction, kept session-only so the recents
+/// view can re-open it and re-enter the existing follow-up chat thread.
+#[derive(Clone)]
+struct LastAi {
+    prompt: String,
+    answer: String,
+    transcript: Vec<ChatMsg>,
+}
+
 struct Ivars {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
@@ -221,6 +233,11 @@ struct Ivars {
     /// Whether we are in follow-up chat mode (an answer is on screen and more
     /// typing continues the thread).
     chat_active: Cell<bool>,
+    /// Session-only ring buffer of recently activated items, shown on an empty
+    /// query. In-memory only; never persisted.
+    recents: RefCell<VecDeque<Item>>,
+    /// Session-only snapshot of the last AI interaction, pinned atop recents.
+    last_ai: RefCell<Option<LastAi>>,
     /// Active screenshot path while in "ask about screenshot" mode.
     screenshot_path: RefCell<Option<String>>,
     /// Captured screenshot path awaiting the main thread.
@@ -498,6 +515,15 @@ impl AppDelegate {
         let ivars = self.ivars();
         self.layout(ivars.results.borrow().len());
 
+        // Normal launcher open with an empty field: surface session recents.
+        // Skipped in screenshot mode (its own empty state) and chat mode.
+        if ivars.screenshot_path.borrow().is_none()
+            && !ivars.chat_active.get()
+            && ivars.search.stringValue().to_string().trim().is_empty()
+        {
+            self.render_recents();
+        }
+
         // Rotate a playful placeholder (unless in screenshot mode).
         if ivars.playful_placeholders && ivars.screenshot_path.borrow().is_none() {
             let idx = ivars.placeholder_idx.get();
@@ -637,9 +663,9 @@ impl AppDelegate {
         }
 
         if query.trim().is_empty() {
-            ivars.results.borrow_mut().clear();
-            ivars.table.reloadData();
-            self.layout(0);
+            // Empty query in normal launcher mode shows session recents instead
+            // of a blank panel. No providers run.
+            self.render_recents();
             return;
         }
         let _ = ivars.query_tx.send((generation, query, filter));
@@ -688,19 +714,93 @@ impl AppDelegate {
         ivars.table.scrollRowToVisible(row as isize);
     }
 
+    /// Record an activated item into the session-only recents ring buffer. Only
+    /// re-runnable launcher actions are kept; AI/confirm/pin actions are skipped.
+    fn record_recent(&self, item: &Item) {
+        let keep = matches!(
+            item.action,
+            Action::Open(_) | Action::RunShell(_) | Action::CopyText(_) | Action::Paste(_)
+        );
+        if !keep {
+            return;
+        }
+        let mut entry = item.clone();
+        entry.source = "Recent";
+        entry.score = 0;
+        let mut recents = self.ivars().recents.borrow_mut();
+        recents.retain(|e| e.title != entry.title);
+        recents.push_front(entry);
+        while recents.len() > RECENTS_CAP {
+            recents.pop_back();
+        }
+    }
+
+    /// Build the empty-query "recents" view from the in-memory buffers: the last
+    /// AI interaction pinned on top, then recently activated items. No providers
+    /// run. Falls back to an empty list (just the search bar) when there's
+    /// nothing yet.
+    fn render_recents(&self) {
+        let ivars = self.ivars();
+        let mut items: Vec<Item> = Vec::new();
+        if let Some(la) = ivars.last_ai.borrow().as_ref() {
+            items.push(Item::new(
+                format!("Last AI: {}", one_line(&la.prompt)),
+                preview(&la.answer),
+                "AI",
+                0,
+                Action::ResumeAi,
+            ));
+        }
+        for entry in ivars.recents.borrow().iter() {
+            items.push(entry.clone());
+        }
+        let n = items.len();
+        *ivars.results.borrow_mut() = items;
+        ivars.table.reloadData();
+        self.layout(n);
+        if n > 0 {
+            self.select_row(0);
+        }
+    }
+
+    /// Re-open the last AI interaction: restore its transcript, re-enter chat
+    /// mode, and show the answer so the next keystroke continues the thread.
+    fn resume_ai(&self) {
+        let ivars = self.ivars();
+        let Some(la) = ivars.last_ai.borrow().clone() else {
+            return;
+        };
+        *ivars.chat.borrow_mut() = la.transcript;
+        ivars.chat_active.set(true);
+        ivars.search.setStringValue(&NSString::from_str(""));
+        ivars
+            .search
+            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_FOLLOWUP)));
+        let items = answer_to_items(&la.answer);
+        let n = items.len();
+        *ivars.results.borrow_mut() = items;
+        ivars.table.reloadData();
+        self.layout(n);
+        if n > 0 {
+            self.select_row(0);
+        }
+    }
+
     fn activate_selection(&self) {
         let ivars = self.ivars();
         let row = ivars.table.selectedRow();
         if row < 0 {
             return;
         }
-        let (action, id) = {
+        let item = {
             let results = ivars.results.borrow();
             match results.get(row as usize) {
-                Some(item) => (item.action.clone(), item.id.clone()),
+                Some(item) => item.clone(),
                 None => return,
             }
         };
+        let action = item.action.clone();
+        let id = item.id.clone();
         // AI requests run asynchronously and keep the panel open.
         if let Action::AskAi { prompt, image } = action {
             self.start_ai(prompt, image);
@@ -708,6 +808,10 @@ impl AppDelegate {
         }
         if let Action::AskAiFollowup { prompt } = action {
             self.start_ai_followup(prompt);
+            return;
+        }
+        if let Action::ResumeAi = action {
+            self.resume_ai();
             return;
         }
         // Toggle a clipboard pin, then refresh the list in place (panel stays open).
@@ -743,6 +847,7 @@ impl AppDelegate {
         if let Some(id) = &id {
             ivars.frecency.record(id);
         }
+        self.record_recent(&item);
         if action.execute() {
             self.hide_and_reset();
         }
@@ -869,6 +974,19 @@ impl AppDelegate {
                 // keystroke composes another turn.
                 ivars.chat.borrow_mut().push(ChatMsg::assistant(&answer));
                 ivars.chat_active.set(true);
+                // Snapshot the interaction (session-only) for the recents view.
+                let transcript = ivars.chat.borrow().clone();
+                let prompt = transcript
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, ai::Role::User))
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                *ivars.last_ai.borrow_mut() = Some(LastAi {
+                    prompt,
+                    answer: answer.clone(),
+                    transcript,
+                });
                 ivars
                     .search
                     .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_FOLLOWUP)));
@@ -1048,6 +1166,26 @@ impl AppDelegate {
 
 /// Turn an AI answer into wrapped result rows. Each row copies the full answer
 /// on Enter, so a multi-line reply is readable and copyable.
+/// Collapse text to a single line (whitespace runs -> one space), trimmed.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One-line preview of a longer answer, truncated with an ellipsis.
+fn preview(text: &str) -> String {
+    const MAX: usize = 96;
+    let line = one_line(text);
+    if line.chars().count() > MAX {
+        let mut s: String = line.chars().take(MAX).collect();
+        s.push('\u{2026}');
+        s
+    } else if line.is_empty() {
+        "Reopen the conversation".to_string()
+    } else {
+        line
+    }
+}
+
 fn answer_to_items(answer: &str) -> Vec<Item> {
     const WRAP: usize = 88;
     let full = answer.trim().to_string();
@@ -1179,6 +1317,7 @@ fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
         "History" => "clock",
         "Clip" => "doc.on.clipboard",
         "Command" => "terminal",
+        "Recent" => "clock.arrow.circlepath",
         "Plugin" => "puzzlepiece.extension",
         "?" => "wand.and.stars",
         _ => "magnifyingglass",
@@ -1204,6 +1343,7 @@ fn source_tag(source: &str) -> Option<&'static str> {
         "Bookmark" => Some("Bookmark"),
         "History" => Some("History"),
         "Plugin" => Some("Plugin"),
+        "Recent" => Some("Recent"),
         _ => None,
     }
 }
@@ -1585,6 +1725,8 @@ fn main() {
         ai_generation: Cell::new(0),
         chat: RefCell::new(Vec::new()),
         chat_active: Cell::new(false),
+        recents: RefCell::new(VecDeque::with_capacity(RECENTS_CAP)),
+        last_ai: RefCell::new(None),
         screenshot_path: RefCell::new(None),
         shot_pending: Arc::new(Mutex::new(None)),
         playful_placeholders: config.ui.playful_placeholders,
