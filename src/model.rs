@@ -12,6 +12,10 @@ pub enum Action {
     AskAi { prompt: String, image: Option<String> },
     /// Store an API key for a backend in the Keychain.
     SetApiKey { provider: String, key: String },
+    /// Two-step confirmation wrapper for destructive actions (empty trash,
+    /// restart, shut down). Special-cased by the UI: the first Enter arms it,
+    /// the second runs `inner`.
+    Confirm { label: String, inner: Box<Action> },
     /// Nothing actionable (informational result).
     None,
 }
@@ -94,6 +98,8 @@ impl Action {
             // Handled by the UI (async); execution here is a no-op that keeps
             // the panel open.
             Action::AskAi { .. } => false,
+            // Handled by the UI's two-step confirm flow; never executed directly.
+            Action::Confirm { .. } => false,
             Action::None => false,
         }
     }

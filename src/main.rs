@@ -40,7 +40,7 @@ use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
     AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, EasterEggProvider,
-    FilesProvider, PluginProvider, WebSearchProvider,
+    FilesProvider, PluginProvider, SystemProvider, WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -165,6 +165,8 @@ struct Ivars {
     critter_idx: Cell<usize>,
     /// Usage learner; records activations and boosts frequent/recent items.
     frecency: Frecency,
+    /// Row index currently armed for a two-step destructive confirmation.
+    pending_confirm: Cell<isize>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -421,6 +423,7 @@ impl AppDelegate {
         }
         ivars.panel.orderOut(None);
         ivars.visible.set(false);
+        ivars.pending_confirm.set(-1);
         // Bump the generation so any in-flight worker results are discarded.
         ivars.generation.set(ivars.generation.get().wrapping_add(1));
         // Clear state for the next invocation.
@@ -435,6 +438,7 @@ impl AppDelegate {
 
     fn dispatch_query(&self) {
         let ivars = self.ivars();
+        ivars.pending_confirm.set(-1);
         let query = ivars.search.stringValue().to_string();
         let generation = ivars.generation.get().wrapping_add(1);
         ivars.generation.set(generation);
@@ -540,6 +544,30 @@ impl AppDelegate {
             self.start_ai(prompt, image);
             return;
         }
+
+        // Two-step confirmation for destructive actions: the first Enter arms
+        // the row, the second (on the same row) runs the wrapped action.
+        if let Action::Confirm { label, inner } = action {
+            if ivars.pending_confirm.get() == row {
+                ivars.pending_confirm.set(-1);
+                if let Some(id) = &id {
+                    ivars.frecency.record(id);
+                }
+                if inner.execute() {
+                    self.hide_and_reset();
+                }
+            } else {
+                ivars.pending_confirm.set(row);
+                if let Some(item) = ivars.results.borrow_mut().get_mut(row as usize) {
+                    item.subtitle = format!("Press Enter again to {label}");
+                }
+                ivars.table.reloadData();
+                self.select_row(row as usize);
+            }
+            return;
+        }
+        ivars.pending_confirm.set(-1);
+
         if let Some(id) = &id {
             ivars.frecency.record(id);
         }
@@ -1000,6 +1028,7 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     engine.add(Box::new(CalcProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
+    engine.add(Box::new(SystemProvider::new()));
     engine.add(Box::new(PluginProvider::new()));
     engine.add(Box::new(AppsProvider::new()));
     engine.add(Box::new(FilesProvider::new()));
@@ -1092,6 +1121,7 @@ fn main() {
         critter_images,
         critter_idx: Cell::new(0),
         frecency: frecency.clone(),
+        pending_confirm: Cell::new(-1),
         _hotkey_manager: manager,
     };
 

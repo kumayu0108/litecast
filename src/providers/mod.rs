@@ -6,6 +6,7 @@ pub mod commands;
 pub mod easter;
 pub mod files;
 pub mod plugins;
+pub mod system;
 pub mod websearch;
 
 pub use ai::AiProvider;
@@ -16,4 +17,5 @@ pub use commands::CommandsProvider;
 pub use easter::EasterEggProvider;
 pub use files::FilesProvider;
 pub use plugins::PluginProvider;
+pub use system::SystemProvider;
 pub use websearch::WebSearchProvider;
