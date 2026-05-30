@@ -30,12 +30,13 @@ use objc2_app_kit::{
     NSPasteboardTypePNG, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableRowView, NSTableView,
     NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSBaselineOffsetAttributeName, NSFontAttributeName, NSForegroundColorAttributeName,
     NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSDictionary, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint,
-    NSRect, NSSize, NSString, NSTimer,
+    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSIndexSet, NSNotification,
+    NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 
 use ai::ChatMsg;
@@ -348,9 +349,7 @@ define_class!(
             let path = self.ivars().shot_pending.lock().ok().and_then(|mut s| s.take());
             let Some(path) = path else { return };
             *self.ivars().screenshot_path.borrow_mut() = Some(path);
-            self.ivars()
-                .search
-                .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_SHOT)));
+            set_placeholder(&self.ivars().search, PLACEHOLDER_SHOT);
             self.ivars().search.setStringValue(&NSString::from_str(""));
             self.show();
             self.dispatch_query();
@@ -502,9 +501,7 @@ impl AppDelegate {
         // Invalidate any in-flight answer so it can't re-enter chat mode.
         ivars.ai_generation.set(ivars.ai_generation.get().wrapping_add(1));
         ivars.search.setStringValue(&NSString::from_str(""));
-        ivars
-            .search
-            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
+        set_placeholder(&ivars.search, PLACEHOLDER_NORMAL);
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
         self.layout(0);
@@ -529,9 +526,7 @@ impl AppDelegate {
             let idx = ivars.placeholder_idx.get();
             ivars.placeholder_idx.set(idx.wrapping_add(1));
             let text = PLAYFUL_PLACEHOLDERS[idx % PLAYFUL_PLACEHOLDERS.len()];
-            ivars
-                .search
-                .setPlaceholderString(Some(&NSString::from_str(text)));
+            set_placeholder(&ivars.search, text);
         }
 
         let app = NSApplication::sharedApplication(self.mtm());
@@ -596,9 +591,7 @@ impl AppDelegate {
         // Clear state for the next invocation.
         ivars.search.setStringValue(&NSString::from_str(""));
         ivars.screenshot_path.borrow_mut().take();
-        ivars
-            .search
-            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
+        set_placeholder(&ivars.search, PLACEHOLDER_NORMAL);
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
     }
@@ -773,9 +766,7 @@ impl AppDelegate {
         *ivars.chat.borrow_mut() = la.transcript;
         ivars.chat_active.set(true);
         ivars.search.setStringValue(&NSString::from_str(""));
-        ivars
-            .search
-            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_FOLLOWUP)));
+        set_placeholder(&ivars.search, PLACEHOLDER_FOLLOWUP);
         let items = answer_to_items(&la.answer);
         let n = items.len();
         *ivars.results.borrow_mut() = items;
@@ -877,9 +868,7 @@ impl AppDelegate {
         ivars.screenshot_path.borrow_mut().take();
         // Clear the field so the next keystroke composes a clean follow-up.
         ivars.search.setStringValue(&NSString::from_str(""));
-        ivars
-            .search
-            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
+        set_placeholder(&ivars.search, PLACEHOLDER_NORMAL);
         let generation = ivars.ai_generation.get().wrapping_add(1);
         ivars.ai_generation.set(generation);
 
@@ -987,9 +976,7 @@ impl AppDelegate {
                     answer: answer.clone(),
                     transcript,
                 });
-                ivars
-                    .search
-                    .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_FOLLOWUP)));
+                set_placeholder(&ivars.search, PLACEHOLDER_FOLLOWUP);
                 answer_to_items(&answer)
             }
             Err(err) => {
@@ -1272,6 +1259,34 @@ fn line_height(size: f64, bold: bool) -> f64 {
     (font.ascender() - font.descender() + font.leading()).ceil()
 }
 
+/// Placeholder point size. Smaller than the 24pt typed text so the hint reads as
+/// secondary rather than dominating the search bar.
+const PLACEHOLDER_FONT_SIZE: f64 = 15.0;
+
+/// Set the search-field placeholder as a smaller, secondary hint via an
+/// attributed string, so it doesn't render at the full 24pt input size while
+/// typed input stays at the normal size. A baseline offset re-centers the
+/// smaller text against the (taller) typed line.
+fn set_placeholder(field: &NSTextField, text: &str) {
+    fn anyobj<T: std::convert::AsRef<AnyObject>>(x: &T) -> &AnyObject {
+        x.as_ref()
+    }
+    let s = NSString::from_str(text);
+    let font = NSFont::systemFontOfSize(PLACEHOLDER_FONT_SIZE);
+    let color = NSColor::placeholderTextColor();
+    let delta = (line_height(24.0, false) - line_height(PLACEHOLDER_FONT_SIZE, false)) / 2.0;
+    let offset = NSNumber::numberWithDouble(-delta);
+    let keys: [&NSString; 3] = [
+        unsafe { NSFontAttributeName },
+        unsafe { NSForegroundColorAttributeName },
+        unsafe { NSBaselineOffsetAttributeName },
+    ];
+    let objs: [&AnyObject; 3] = [anyobj(&*font), anyobj(&*color), anyobj(&*offset)];
+    let attrs = NSDictionary::from_slices(&keys, &objs);
+    let attr = unsafe { NSAttributedString::new_with_attributes(&s, &attrs) };
+    field.setPlaceholderAttributedString(Some(&attr));
+}
+
 // Reading the AppKit font-weight statics is safe (immutable CGFloat constants).
 fn weight_medium() -> NSFontWeight {
     unsafe { NSFontWeightMedium }
@@ -1503,7 +1518,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     search.setSelectable(true);
     search.setFocusRingType(NSFocusRingType::None);
     search.setFont(Some(&NSFont::systemFontOfSize(24.0)));
-    search.setPlaceholderString(Some(&NSString::from_str("Search litecast...")));
+    set_placeholder(&search, PLACEHOLDER_NORMAL);
 
     // Results table inside a scroll view.
     let table = NSTableView::initWithFrame(
