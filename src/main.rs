@@ -50,8 +50,8 @@ use model::{Action, Item};
 use providers::{
     AiCommandsProvider, AiProvider, AppsProvider, BookmarksProvider, CalcProvider,
     ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider, EmojiProvider,
-    FilesProvider, PluginProvider, QuicklinksProvider, SnippetsProvider, SystemProvider,
-    WebSearchProvider, WindowProvider,
+    FilesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, SnippetsProvider,
+    SystemProvider, WebSearchProvider, WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -1722,6 +1722,8 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
         engine.add(Box::new(WindowProvider::new()), Filter::Cmd);
     }
     engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
+    // Process manager: keyword-gated (`kill`/`ps`); kills go through a confirm.
+    engine.add(Box::new(ProcessProvider::new()), Filter::Cmd);
     engine.add(Box::new(AppsProvider::new()), Filter::Apps);
     engine.add(Box::new(FilesProvider::new()), Filter::Files);
     engine.add(Box::new(BookmarksProvider::new()), Filter::Web);
