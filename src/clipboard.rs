@@ -2,6 +2,9 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::paths::support_file;
 
@@ -17,31 +20,77 @@ pub fn set_clipboard(text: &str) {
     }
 }
 
-/// Thread-safe, capped clipboard history shared between the watcher (main
-/// thread) and the clipboard provider (worker thread).
+/// The nature of a clipboard entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClipKind {
+    Text,
+    Link,
+    Image,
+}
+
+/// A single clipboard history entry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClipEntry {
+    pub kind: ClipKind,
+    /// Text/link content, or a short label for images.
+    pub text: String,
+    /// Path to the stored PNG for image entries.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub ts: u64,
+}
+
+impl ClipEntry {
+    /// Stable key used to identify an entry for pin toggling and dedup.
+    pub fn key(&self) -> &str {
+        self.path.as_deref().unwrap_or(&self.text)
+    }
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn detect_kind(text: &str) -> ClipKind {
+    let t = text.trim();
+    let is_url = (t.starts_with("http://") || t.starts_with("https://"))
+        && !t.chars().any(|c| c.is_whitespace());
+    if is_url {
+        ClipKind::Link
+    } else {
+        ClipKind::Text
+    }
+}
+
+/// Thread-safe clipboard history shared between the watcher (main thread) and
+/// the clipboard provider (worker thread). Pinned entries persist at the top and
+/// are exempt from ring-buffer eviction.
 #[derive(Clone)]
 pub struct History {
-    inner: Arc<Mutex<VecDeque<String>>>,
+    inner: Arc<Mutex<VecDeque<ClipEntry>>>,
+    /// Max unpinned text/link entries kept.
     cap: usize,
+    /// Max image entries kept (pinned images exempt).
+    image_cap: usize,
 }
 
 impl History {
-    pub fn new(cap: usize) -> Self {
-        let mut items = VecDeque::new();
-        if let Ok(data) = std::fs::read_to_string(support_file(HISTORY_FILE)) {
-            if let Ok(loaded) = serde_json::from_str::<Vec<String>>(&data) {
-                for entry in loaded.into_iter().take(cap) {
-                    items.push_back(entry);
-                }
-            }
-        }
+    pub fn new(cap: usize, image_cap: usize) -> Self {
+        let items = load(cap);
         Self {
             inner: Arc::new(Mutex::new(items)),
             cap,
+            image_cap,
         }
     }
 
-    /// Record a freshly copied value. No-ops on empty/duplicate-of-most-recent.
+    /// Record a freshly copied text value. No-ops on empty/duplicate-of-most-recent.
     pub fn record(&self, text: String) {
         if text.is_empty() {
             return;
@@ -50,32 +99,147 @@ impl History {
             Ok(g) => g,
             Err(_) => return,
         };
-        if guard.front().map(|s| s.as_str()) == Some(text.as_str()) {
+        if guard.front().map(|e| e.text.as_str()) == Some(text.as_str()) {
             return;
         }
-        // Move an existing identical entry to the front instead of duplicating.
-        if let Some(pos) = guard.iter().position(|s| s == &text) {
-            guard.remove(pos);
-        }
-        guard.push_front(text);
-        while guard.len() > self.cap {
-            guard.pop_back();
-        }
-        let snapshot: Vec<String> = guard.iter().cloned().collect();
-        drop(guard);
-        self.save(&snapshot);
+        // Move an existing identical entry to the front (preserving its pin).
+        let existing_pin = guard
+            .iter()
+            .position(|e| e.text == text && e.kind != ClipKind::Image)
+            .map(|pos| guard.remove(pos).map(|e| e.pinned).unwrap_or(false))
+            .unwrap_or(false);
+        guard.push_front(ClipEntry {
+            kind: detect_kind(&text),
+            text,
+            path: None,
+            pinned: existing_pin,
+            ts: now(),
+        });
+        self.evict(&mut guard);
+        self.persist(&guard);
     }
 
-    pub fn snapshot(&self) -> Vec<String> {
+    /// Record a freshly captured image stored at `path`.
+    pub fn record_image(&self, path: String) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if guard
+            .front()
+            .and_then(|e| e.path.as_deref())
+            == Some(path.as_str())
+        {
+            return;
+        }
+        let label = path
+            .rsplit('/')
+            .next()
+            .map(|n| format!("Image ({n})"))
+            .unwrap_or_else(|| "Image".to_string());
+        guard.push_front(ClipEntry {
+            kind: ClipKind::Image,
+            text: label,
+            path: Some(path),
+            pinned: false,
+            ts: now(),
+        });
+        self.evict(&mut guard);
+        self.persist(&guard);
+    }
+
+    /// Toggle the pinned state of the entry identified by `key` (text or path).
+    pub fn toggle_pin(&self, key: &str) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if let Some(entry) = guard.iter_mut().find(|e| e.key() == key) {
+            entry.pinned = !entry.pinned;
+        }
+        self.persist(&guard);
+    }
+
+    pub fn snapshot(&self) -> Vec<ClipEntry> {
         self.inner
             .lock()
             .map(|g| g.iter().cloned().collect())
             .unwrap_or_default()
     }
 
-    fn save(&self, snapshot: &[String]) {
-        if let Ok(json) = serde_json::to_string(snapshot) {
+    /// Drop oldest unpinned entries beyond the caps. Deletes evicted image files.
+    fn evict(&self, guard: &mut VecDeque<ClipEntry>) {
+        // Text/link cap.
+        loop {
+            let unpinned_text = guard
+                .iter()
+                .filter(|e| !e.pinned && e.kind != ClipKind::Image)
+                .count();
+            if unpinned_text <= self.cap {
+                break;
+            }
+            if let Some(pos) = guard
+                .iter()
+                .rposition(|e| !e.pinned && e.kind != ClipKind::Image)
+            {
+                guard.remove(pos);
+            } else {
+                break;
+            }
+        }
+        // Image cap (delete the backing file on eviction).
+        loop {
+            let unpinned_images = guard
+                .iter()
+                .filter(|e| !e.pinned && e.kind == ClipKind::Image)
+                .count();
+            if unpinned_images <= self.image_cap {
+                break;
+            }
+            if let Some(pos) = guard
+                .iter()
+                .rposition(|e| !e.pinned && e.kind == ClipKind::Image)
+            {
+                if let Some(removed) = guard.remove(pos) {
+                    if let Some(p) = removed.path {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn persist(&self, guard: &VecDeque<ClipEntry>) {
+        let snapshot: Vec<ClipEntry> = guard.iter().cloned().collect();
+        if let Ok(json) = serde_json::to_string(&snapshot) {
             let _ = std::fs::write(support_file(HISTORY_FILE), json);
         }
     }
+}
+
+/// Load history from disk, migrating the legacy `Vec<String>` format if found.
+fn load(cap: usize) -> VecDeque<ClipEntry> {
+    let mut items = VecDeque::new();
+    let Ok(data) = std::fs::read_to_string(support_file(HISTORY_FILE)) else {
+        return items;
+    };
+    if let Ok(loaded) = serde_json::from_str::<Vec<ClipEntry>>(&data) {
+        for entry in loaded {
+            items.push_back(entry);
+        }
+    } else if let Ok(legacy) = serde_json::from_str::<Vec<String>>(&data) {
+        // Migrate: wrap each old string as an (unpinned) text/link entry.
+        for text in legacy.into_iter().take(cap) {
+            items.push_back(ClipEntry {
+                kind: detect_kind(&text),
+                text,
+                path: None,
+                pinned: false,
+                ts: 0,
+            });
+        }
+    }
+    items
 }

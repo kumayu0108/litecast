@@ -16,6 +16,9 @@ pub enum Action {
     /// Continue the current AI conversation with `prompt`, threading prior turns.
     /// Handled specially by the UI (async, keeps the panel open).
     AskAiFollowup { prompt: String },
+    /// Toggle the pinned state of a clipboard entry (identified by its key:
+    /// text or image path). Handled by the UI so it can refresh the list.
+    TogglePin { key: String },
     /// Store an API key for a backend in the Keychain.
     SetApiKey { provider: String, key: String },
     /// Two-step confirmation wrapper for destructive actions (empty trash,
@@ -109,6 +112,8 @@ impl Action {
             // the panel open.
             Action::AskAi { .. } => false,
             Action::AskAiFollowup { .. } => false,
+            // Handled by the UI; never executed directly.
+            Action::TogglePin { .. } => false,
             // Handled by the UI's two-step confirm flow; never executed directly.
             Action::Confirm { .. } => false,
             Action::None => false,

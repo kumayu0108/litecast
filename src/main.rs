@@ -23,15 +23,16 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSAnimationContext, NSBox, NSBoxType, NSColor, NSControl, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSImage, NSImageView, NSPanel, NSPasteboard, NSPasteboardTypeString,
+    NSAnimationContext, NSBitmapImageFileType, NSBitmapImageRep, NSBox, NSBoxType, NSColor,
+    NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSImage, NSImageView,
+    NSPanel, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
     NSScreen, NSScrollView, NSTableColumn, NSTableView, NSTextField, NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSTimer,
+    MainThreadMarker, NSData, NSDictionary, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString, NSTimer,
 };
 
 use ai::ChatMsg;
@@ -160,6 +161,8 @@ struct Ivars {
     pending: PendingResults,
     /// Clipboard history shared with the watcher timer.
     clip_history: History,
+    /// Whether to capture images copied to the clipboard.
+    keep_images: bool,
     /// Last observed pasteboard change count.
     last_change: Cell<isize>,
     /// AI backend configuration (provider/model/endpoint).
@@ -321,6 +324,11 @@ define_class!(
             ivars.last_change.set(count);
             if let Some(text) = unsafe { pasteboard.stringForType(NSPasteboardTypeString) } {
                 ivars.clip_history.record(text.to_string());
+            } else if ivars.keep_images {
+                // No text: capture an image off the pasteboard (if any).
+                if let Some(path) = save_pasteboard_image(&pasteboard, count) {
+                    ivars.clip_history.record_image(path);
+                }
             }
         }
 
@@ -644,6 +652,12 @@ impl AppDelegate {
         }
         if let Action::AskAiFollowup { prompt } = action {
             self.start_ai_followup(prompt);
+            return;
+        }
+        // Toggle a clipboard pin, then refresh the list in place (panel stays open).
+        if let Action::TogglePin { key } = action {
+            ivars.clip_history.toggle_pin(&key);
+            self.dispatch_query();
             return;
         }
 
@@ -989,6 +1003,28 @@ fn answer_to_items(answer: &str) -> Vec<Item> {
             Item::new(line, subtitle, "AI", 0, Action::CopyText(full.clone()))
         })
         .collect()
+}
+
+/// Save an image from the pasteboard to `clip-images/clip-<change>.png` under the
+/// support dir, returning the path. Prefers PNG data; converts TIFF when needed.
+fn save_pasteboard_image(pasteboard: &NSPasteboard, change: isize) -> Option<String> {
+    let png: Retained<NSData> = unsafe {
+        if let Some(data) = pasteboard.dataForType(NSPasteboardTypePNG) {
+            data
+        } else {
+            let tiff = pasteboard.dataForType(NSPasteboardTypeTIFF)?;
+            let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)?;
+            let props = NSDictionary::new();
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props)?
+        }
+    };
+
+    let dir = crate::paths::support_dir().join("clip-images");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("clip-{change}.png"));
+    let path_str = path.to_str()?;
+    let ok = png.writeToFile_atomically(&NSString::from_str(path_str), true);
+    ok.then(|| path_str.to_string())
 }
 
 /// Parse a leading `@token` filter prefix. Returns the matched filter and the
@@ -1381,7 +1417,7 @@ fn main() {
 
     let (query_tx, query_rx) = mpsc::channel::<(u64, String, Filter)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
-    let history = History::new(50);
+    let history = History::new(50, config.clipboard.max_images);
     let frecency = Frecency::load();
 
     let ivars = Ivars {
@@ -1398,6 +1434,7 @@ fn main() {
         chip,
         pending: pending.clone(),
         clip_history: history.clone(),
+        keep_images: config.clipboard.keep_images,
         last_change: Cell::new(-1),
         ai_config: config.ai.clone(),
         ai_pending: Arc::new(Mutex::new(None)),

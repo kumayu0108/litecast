@@ -1,4 +1,4 @@
-use crate::clipboard::History;
+use crate::clipboard::{ClipKind, History};
 use crate::config::AiConfig;
 use crate::engine::{fuzzy_score, Provider};
 use crate::model::{Action, Item};
@@ -58,7 +58,9 @@ impl AiCommandsProvider {
         self.history
             .snapshot()
             .into_iter()
-            .find(|s| !s.trim().is_empty())
+            .filter(|e| e.kind != ClipKind::Image)
+            .map(|e| e.text)
+            .find(|t| !t.trim().is_empty())
     }
 
     fn emit(&self, cmd: &AiCommand, arg: &str, score: i64, out: &mut Vec<Item>) {

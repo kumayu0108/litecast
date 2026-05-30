@@ -57,6 +57,13 @@ endpoint = ""
 [ui]
 playful_placeholders = true
 critters = true
+
+# Clipboard history. Pin entries with "clip pin <number>" so they persist at the
+# top. Images copied to the clipboard are captured and stored under the support
+# directory; set keep_images = false to disable, or cap how many are kept.
+[clipboard]
+keep_images = true
+max_images = 20
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +76,7 @@ pub struct Config {
     pub conversion: ConversionConfig,
     pub ai: AiConfig,
     pub ui: UiConfig,
+    pub clipboard: ClipboardConfig,
 }
 
 impl Default for Config {
@@ -81,6 +89,25 @@ impl Default for Config {
             conversion: ConversionConfig::default(),
             ai: AiConfig::default(),
             ui: UiConfig::default(),
+            clipboard: ClipboardConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ClipboardConfig {
+    /// Capture images copied to the clipboard (stored under the support dir).
+    pub keep_images: bool,
+    /// Max image entries kept in history (pinned images are exempt).
+    pub max_images: usize,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self {
+            keep_images: true,
+            max_images: 20,
         }
     }
 }
