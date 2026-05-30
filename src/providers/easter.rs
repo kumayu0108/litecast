@@ -27,6 +27,33 @@ impl Provider for EasterEggProvider {
                 "I launch apps, not espresso. Yet.",
             )),
             "meaning of life" => Some(("42.", "You're welcome.")),
+            "hello" | "hi" | "hey" => Some(("Hey there.", "What can I launch for you?")),
+            "sudo" => Some((
+                "Nice try.",
+                "You already have my full cooperation.",
+            )),
+            "rm -rf /" | "rm -rf" => Some((
+                "Absolutely not.",
+                "We don't do that here.",
+            )),
+            "ping" => Some(("Pong.", "Latency: basically zero.")),
+            "/flip" | "flip a coin" => Some((
+                "Heads.",
+                "Trust me, I'm a launcher.",
+            )),
+            "konami" | "up up down down" => Some((
+                "30 lives granted.",
+                "...metaphorically speaking.",
+            )),
+            "why" => Some(("Why not?", "Deep questions for a search box.")),
+            "/dance" => Some(("\\o/ ... \\o/", "The critter approves.")),
+            "thanks" | "thank you" => Some(("Anytime.", "That's what I'm here for.")),
+            "open the pod bay doors" => Some((
+                "I'm afraid I can't do that.",
+                "But I can open almost anything else.",
+            )),
+            "is it friday" => Some(("It's always launch o'clock.", "Close enough.")),
+            "/shrug" => Some(("¯\\_(ツ)_/¯", "Couldn't have said it better.")),
             _ => None,
         };
         if let Some((title, subtitle)) = response {

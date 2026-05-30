@@ -60,6 +60,18 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "Apps, files, math, the web - go on.",
     "I was just resting, honest.",
     "Your wish is my command... command.",
+    "Tab to filter, Enter to fly.",
+    "Faster than you can say Spotlight.",
+    "Go ahead, type something brilliant.",
+    "Less clicking, more launching.",
+    "100 usd to eur? :rocket? I got you.",
+    "The blank box of infinite potential.",
+    "Searching is believing.",
+    "Psst - try @apps or @calc.",
+    "Tiny binary, big dreams.",
+    "Name it and I'll find it.",
+    "Keyboard warrior mode: engaged.",
+    "What would Raycast do? This, but lighter.",
 ];
 const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
