@@ -69,6 +69,11 @@ pub struct Item {
     /// `None` for volatile results (calc, conversions, AI answers) that should
     /// not be learned.
     pub id: Option<String>,
+    /// When true, this row is rendered as a single wrapping multi-line "answer
+    /// block" (sized to its text height) rather than a fixed-height launcher row.
+    /// Used for AI answers so a long reply reads as one paragraph, not one tall
+    /// row per wrapped line.
+    pub multiline: bool,
 }
 
 impl Item {
@@ -87,6 +92,7 @@ impl Item {
             source,
             icon_path: None,
             id: None,
+            multiline: false,
         }
     }
 

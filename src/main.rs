@@ -84,6 +84,14 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
 ];
 const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
+// AI answer "block" rendering: a single wrapping text view rather than one tall
+// row per line. Sized to the wrapped text height with a tight line height.
+const ANSWER_FONT_SIZE: f64 = 13.0;
+const ANSWER_PAD_V: f64 = 9.0;
+const ANSWER_WRAP: usize = 84;
+// Cap the results area height (matches MAX_VISIBLE_ROWS normal rows); taller
+// content scrolls within this band so the panel never grows without bound.
+const MAX_RESULTS_H: f64 = MAX_VISIBLE_ROWS as f64 * ROW_H;
 // Session-only recents ring buffer capacity (in-memory, reset on quit).
 const RECENTS_CAP: usize = 12;
 const ROW_ICON: f64 = 26.0;
@@ -441,6 +449,14 @@ define_class!(
         #[unsafe(method(numberOfRowsInTableView:))]
         fn number_of_rows(&self, _table: &NSTableView) -> isize {
             self.ivars().results.borrow().len() as isize
+        }
+
+        // NSTableViewDelegate: variable row height. AI answer "block" rows are
+        // sized to their wrapped text height; everything else is a normal row.
+        #[unsafe(method(tableView:heightOfRow:))]
+        fn height_of_row(&self, _table: &NSTableView, row: isize) -> f64 {
+            let results = self.ivars().results.borrow();
+            results.get(row as usize).map(row_height_for).unwrap_or(ROW_H)
         }
 
         // NSTableViewDelegate: supply our custom row view for inset selection.
@@ -1115,13 +1131,23 @@ impl AppDelegate {
     }
 
     /// Resize the panel to fit `rows` results and reposition the subviews.
-    fn layout(&self, rows: usize) {
+    fn layout(&self, _rows: usize) {
         let ivars = self.ivars();
-        let visible_rows = rows.min(MAX_VISIBLE_ROWS);
-        let results_h = visible_rows as f64 * ROW_H;
+        // Sum the actual per-row heights (AI answer blocks are taller than a
+        // normal row), capped so the panel never grows unbounded; overflow
+        // scrolls within the results band.
+        let (results_h, has_rows) = {
+            let results = ivars.results.borrow();
+            if results.is_empty() {
+                (0.0, false)
+            } else {
+                let total: f64 = results.iter().map(row_height_for).sum();
+                (total.min(MAX_RESULTS_H), true)
+            }
+        };
         // The results block adds symmetric breathing room: a small gap under the
         // separator and bottom padding so the last row clears the rounded corner.
-        let results_block = if visible_rows > 0 {
+        let results_block = if has_rows {
             RESULTS_BOTTOM_PAD + results_h + RESULTS_TOP_GAP
         } else {
             0.0
@@ -1203,7 +1229,7 @@ impl AppDelegate {
             NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, 1.0),
         );
         ivars.separator.setFrame(separator_frame);
-        ivars.separator.setHidden(visible_rows == 0);
+        ivars.separator.setHidden(!has_rows);
 
         // Results scroll view, inset above the bottom padding so the last row
         // is fully visible and clears the rounded corners.
@@ -1212,7 +1238,7 @@ impl AppDelegate {
             NSSize::new(PANEL_WIDTH, results_h),
         );
         ivars.scroll.setFrame(scroll_frame);
-        ivars.scroll.setHidden(visible_rows == 0);
+        ivars.scroll.setHidden(!has_rows);
     }
 }
 
@@ -1238,42 +1264,97 @@ fn preview(text: &str) -> String {
     }
 }
 
+/// Render an AI answer as a SINGLE multi-line "answer block" item: the whole
+/// reply is shown in one wrapping text view (sized to its wrapped height by
+/// `row_height_for`) rather than one tall launcher row per wrapped line. Enter
+/// still copies the full original answer.
 fn answer_to_items(answer: &str) -> Vec<Item> {
-    const WRAP: usize = 88;
     let full = answer.trim().to_string();
-    let mut lines: Vec<String> = Vec::new();
-    for raw_line in full.lines() {
-        if raw_line.is_empty() {
-            lines.push(String::new());
+    let body = clean_answer_text(&full);
+    let display = if body.is_empty() {
+        "(empty response)".to_string()
+    } else {
+        body
+    };
+    let mut item = Item::new(display, "", "AI", 0, Action::CopyText(full));
+    item.multiline = true;
+    vec![item]
+}
+
+/// Height a result row occupies. Normal rows are a fixed `ROW_H`; an AI answer
+/// block is sized to its wrapped text (tight line height + vertical padding).
+fn row_height_for(item: &Item) -> f64 {
+    if item.multiline {
+        let lines = item.title.lines().count().max(1) as f64;
+        (lines * line_height(ANSWER_FONT_SIZE, false) + 2.0 * ANSWER_PAD_V).ceil()
+    } else {
+        ROW_H
+    }
+}
+
+/// Lightly de-markdown an answer and hard-wrap it to `ANSWER_WRAP` columns so it
+/// reads as a clean paragraph block. Runs of blank lines collapse to a single
+/// separator (so there are no empty rows), and leading/trailing blanks drop.
+fn clean_answer_text(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut prev_blank = true; // suppress leading blank lines
+    for raw in text.lines() {
+        let line = strip_inline_markdown(raw);
+        if line.trim().is_empty() {
+            if !prev_blank {
+                out.push(String::new());
+            }
+            prev_blank = true;
             continue;
         }
-        let mut current = String::new();
-        for word in raw_line.split_whitespace() {
-            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > WRAP {
-                lines.push(std::mem::take(&mut current));
-            }
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
+        prev_blank = false;
+        wrap_line(&line, ANSWER_WRAP, &mut out);
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// Word-wrap a single logical line into `out` at `wrap` columns (by char count).
+fn wrap_line(line: &str, wrap: usize, out: &mut Vec<String>) {
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > wrap {
+            out.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {
-            lines.push(current);
+            current.push(' ');
         }
+        current.push_str(word);
     }
-    if lines.is_empty() {
-        lines.push("(empty response)".to_string());
+    if !current.is_empty() {
+        out.push(current);
     }
+}
 
-    lines
-        .into_iter()
-        .take(MAX_VISIBLE_ROWS)
-        .enumerate()
-        .map(|(i, line)| {
-            let subtitle = if i == 0 { "Enter to copy full answer" } else { "" };
-            Item::new(line, subtitle, "AI", 0, Action::CopyText(full.clone()))
-        })
-        .collect()
+/// Strip the most common markdown markers so an answer renders as clean plain
+/// text: `#` headings, `-`/`*` bullets (kept as `•`), and `**`/`` ` `` emphasis.
+fn strip_inline_markdown(line: &str) -> String {
+    let trimmed = line.trim_start();
+    // Headings: drop the leading `#` run.
+    let without_heading = trimmed.trim_start_matches('#').trim_start();
+    let without_heading = if without_heading.len() != trimmed.len() {
+        without_heading.to_string()
+    } else {
+        trimmed.to_string()
+    };
+    // List bullets -> a single bullet glyph.
+    let bulleted = match without_heading
+        .strip_prefix("- ")
+        .or_else(|| without_heading.strip_prefix("* "))
+        .or_else(|| without_heading.strip_prefix("+ "))
+    {
+        Some(rest) => format!("\u{2022} {rest}"),
+        None => without_heading,
+    };
+    // Emphasis / inline-code markers.
+    bulleted.replace("**", "").replace("__", "").replace('`', "")
 }
 
 /// Save an image from the pasteboard to `clip-images/clip-<change>.png` under the
@@ -1434,10 +1515,47 @@ fn source_tag(source: &str) -> Option<&'static str> {
 
 fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
     let width = PANEL_WIDTH;
+    let height = row_height_for(item);
     let container = NSView::initWithFrame(
         NSView::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, ROW_H)),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)),
     );
+
+    // AI answer block: a single wrapping multi-line text view with one sparkle
+    // icon at the top, instead of one tall launcher row per wrapped line.
+    if item.multiline {
+        let icon_view = NSImageView::initWithFrame(
+            NSImageView::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(SIDE_INSET, height - ANSWER_PAD_V - ROW_ICON),
+                NSSize::new(ROW_ICON, ROW_ICON),
+            ),
+        );
+        if let Some(image) = row_icon(item) {
+            icon_view.setImage(Some(&image));
+        }
+        icon_view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+        container.addSubview(&icon_view);
+
+        let text_x = SIDE_INSET + ROW_ICON + 12.0;
+        let text_w = (width - SIDE_INSET - text_x).max(40.0);
+        let label = make_label(
+            mtm,
+            &item.title,
+            ANSWER_FONT_SIZE,
+            weight_regular(),
+            &NSColor::labelColor(),
+        );
+        label.setUsesSingleLineMode(false);
+        label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
+        label.setMaximumNumberOfLines(0);
+        label.setFrame(NSRect::new(
+            NSPoint::new(text_x, ANSWER_PAD_V),
+            NSSize::new(text_w, height - 2.0 * ANSWER_PAD_V),
+        ));
+        container.addSubview(&label);
+        return container;
+    }
 
     // Icon left edge shares the search field's left margin so everything lines
     // up on a common left edge.
