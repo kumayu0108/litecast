@@ -37,6 +37,9 @@ pub enum Action {
     /// Re-open the last AI interaction from the recents view, restoring its
     /// transcript and re-entering follow-up chat. Handled specially by the UI.
     ResumeAi,
+    /// Accept an `@shortcut` autocomplete suggestion: complete the `@token` in
+    /// the search field. Handled specially by the UI (keeps the panel open).
+    Autocomplete { token: String },
     /// Move/resize the frontmost app's focused window. Handled specially by the
     /// UI (main thread + Accessibility), like AI actions.
     Window(WindowOp),
@@ -69,11 +72,13 @@ pub struct Item {
     /// `None` for volatile results (calc, conversions, AI answers) that should
     /// not be learned.
     pub id: Option<String>,
-    /// When true, this row is rendered as a single wrapping multi-line "answer
-    /// block" (sized to its text height) rather than a fixed-height launcher row.
-    /// Used for AI answers so a long reply reads as one paragraph, not one tall
-    /// row per wrapped line.
+    /// When true, this row is rendered as a single rounded "answer card" (sized
+    /// to its wrapped text height) rather than a fixed-height launcher row.
+    /// Used for AI answers so a long reply reads as one polished card.
     pub multiline: bool,
+    /// Precomputed pixel height for a multiline answer card, measured on the
+    /// main thread from the wrapped text. `None` for normal rows.
+    pub block_height: Option<f64>,
 }
 
 impl Item {
@@ -93,6 +98,7 @@ impl Item {
             icon_path: None,
             id: None,
             multiline: false,
+            block_height: None,
         }
     }
 
@@ -143,6 +149,7 @@ impl Action {
             Action::AskAi { .. } => false,
             Action::AskAiFollowup { .. } => false,
             Action::ResumeAi => false,
+            Action::Autocomplete { .. } => false,
             // Handled by the UI (main thread + Accessibility); never run here.
             Action::Window(_) => false,
             // Handled by the UI; never executed directly.

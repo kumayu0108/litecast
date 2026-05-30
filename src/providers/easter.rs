@@ -21,6 +21,10 @@ impl Provider for EasterEggProvider {
                 "Built in Rust, light as a feather.",
                 "You typed my name. I'm flattered.",
             )),
+            "critter" => Some((
+                "A critter appears!",
+                "Watch the bottom edge.",
+            )),
             "do a barrel roll" => Some(("Whee!", "Pretend the window just spun.")),
             "/coffee" | "make coffee" => Some((
                 "Brewing... just kidding.",

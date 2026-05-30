@@ -38,21 +38,21 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSIndexSet, NSNotification,
-    NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    NSNumber, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSTimer,
 };
 
 use ai::ChatMsg;
 use clipboard::History;
-use config::{AiConfig, CommandConfig, Config, HotkeyConfig};
+use config::{AiConfig, AppCommandConfig, CommandConfig, Config, HotkeyConfig};
 use currency::CurrencyCache;
-use engine::{Engine, Filter};
+use engine::{fuzzy_score, Engine, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
-    AiCommandsProvider, AiProvider, AppsProvider, BookmarksProvider, CalcProvider,
-    ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider, EmojiProvider,
-    FilesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, SnippetsProvider,
-    SystemProvider, WebSearchProvider, WindowProvider,
+    AiCommandsProvider, AiProvider, AppCommandsProvider, AppsProvider, BookmarksProvider,
+    CalcProvider, ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider,
+    EmojiProvider, FilesProvider, PluginProvider, ProcessProvider, QuicklinksProvider,
+    SnippetsProvider, SystemProvider, WebSearchProvider, WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -76,7 +76,7 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "I was just resting, honest.",
     "Your wish is my command... command.",
     "Tab to filter, Enter to fly.",
-    "Faster than you can say Spotlight.",
+    "Faster than you can say launcher.",
     "Go ahead, type something brilliant.",
     "Less clicking, more launching.",
     "100 usd to eur? :rocket? I got you.",
@@ -86,15 +86,29 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "Tiny binary, big dreams.",
     "Name it and I'll find it.",
     "Keyboard warrior mode: engaged.",
-    "What would Raycast do? This, but lighter.",
+    "Lighter than the rest, by design.",
 ];
 const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
-// AI answer "block" rendering: a single wrapping text view rather than one tall
-// row per line. Sized to the wrapped text height with a tight line height.
+// AI answer "card" rendering: the whole reply lives in one rounded container
+// with a wrapping text view, a leading sparkle accent, and a copy button. Sized
+// to the measured wrapped-text height.
 const ANSWER_FONT_SIZE: f64 = 13.0;
-const ANSWER_PAD_V: f64 = 9.0;
-const ANSWER_WRAP: usize = 84;
+// Outer margin of the card within its table row (horizontal aligns with rows).
+const CARD_MARGIN_X: f64 = SIDE_INSET;
+const CARD_MARGIN_Y: f64 = 7.0;
+// Internal padding between the card edge and its content.
+const CARD_PAD: f64 = 14.0;
+// Minimum card height so a one-line answer still reads as a card.
+const CARD_MIN_H: f64 = 46.0;
+// Leading accent (sparkle) glyph box.
+const ANSWER_ACCENT: f64 = 16.0;
+// Left edge of the wrapping text inside the card (pad + accent + gap).
+const ANSWER_TEXT_LEFT: f64 = CARD_PAD + ANSWER_ACCENT + 10.0;
+// Copy button box reserved in the top-right corner.
+const ANSWER_COPY: f64 = 22.0;
+// Horizontal space reserved on the right so wrapped text clears the copy button.
+const ANSWER_TEXT_RIGHT_RESERVE: f64 = ANSWER_COPY + 8.0;
 // Cap the results area height (matches MAX_VISIBLE_ROWS normal rows); taller
 // content scrolls within this band so the panel never grows without bound.
 const MAX_RESULTS_H: f64 = MAX_VISIBLE_ROWS as f64 * ROW_H;
@@ -173,6 +187,9 @@ define_class!(
 // Horizontal/vertical inset of the rounded selection highlight within a row.
 const SELECTION_INSET_X: f64 = 8.0;
 const SELECTION_INSET_Y: f64 = 4.0;
+// Inset of the right-side source tag in from the selection highlight's right
+// edge, so the tag sits comfortably inside the highlighted row.
+const TAG_RIGHT_INSET: f64 = 14.0;
 
 // Custom row view that draws a rounded, inset selection highlight (Raycast-style)
 // instead of the default full-width table highlight.
@@ -180,11 +197,16 @@ define_class!(
     #[unsafe(super(NSTableRowView))]
     #[thread_kind = MainThreadOnly]
     #[name = "LcRowView"]
+    #[ivars = Cell<bool>]
     struct LcRowView;
 
     impl LcRowView {
         #[unsafe(method(drawSelectionInRect:))]
         fn draw_selection(&self, _dirty: NSRect) {
+            // AI answer cards draw their own container, so skip the row highlight.
+            if self.ivars().get() {
+                return;
+            }
             if !self.isSelected() {
                 return;
             }
@@ -211,6 +233,14 @@ struct LastAi {
     prompt: String,
     answer: String,
     transcript: Vec<ChatMsg>,
+}
+
+/// A single `@`-shortcut suggestion: the token typed after `@` plus a short
+/// description. Covers category filters (`@apps`, `@calc`, …) and app commands
+/// (`@term`, `@finder`, plus any user-defined `[[app_commands]]`).
+struct ShortcutEntry {
+    token: String,
+    desc: String,
 }
 
 struct Ivars {
@@ -268,6 +298,8 @@ struct Ivars {
     critter_view: Retained<NSImageView>,
     /// Text-glyph critter used out of the box when no GIFs are installed.
     critter_label: Retained<NSTextField>,
+    /// Whether the wandering-critter feature is enabled (`[ui] critters`).
+    critters_enabled: bool,
     /// Loaded critter GIF images (empty = use the built-in glyph critter).
     critter_images: Vec<Retained<NSImage>>,
     /// Rotating index into the critter image list.
@@ -276,6 +308,9 @@ struct Ivars {
     frecency: Frecency,
     /// Row index currently armed for a two-step destructive confirmation.
     pending_confirm: Cell<isize>,
+    /// Available `@`-shortcut suggestions (filters + app commands), shown while
+    /// the user is typing an `@token`.
+    autocomplete: Vec<ShortcutEntry>,
     /// PID of the app that was frontmost just before the panel opened. Window
     /// commands target this app's focused window (since opening the panel makes
     /// litecast itself frontmost). -1 when unknown.
@@ -301,6 +336,15 @@ define_class!(
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             self.hide_and_reset();
+        }
+
+        // When the panel becomes key, select the whole (unsubmitted) query so the
+        // next non-arrow keystroke overwrites it, like a fresh search.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            if self.ivars().visible.get() {
+                self.select_all_search();
+            }
         }
     }
 
@@ -431,8 +475,11 @@ define_class!(
                 self.activate_selection();
                 true
             } else if selector == sel!(insertTab:) {
-                // Tab cycles the category filter instead of moving focus.
-                self.cycle_filter(true);
+                // While typing an `@token`, Tab accepts the nearest autocomplete
+                // match; otherwise it cycles the category filter.
+                if !self.accept_nearest_autocomplete() {
+                    self.cycle_filter(true);
+                }
                 true
             } else if selector == sel!(insertBacktab:) {
                 self.cycle_filter(false);
@@ -472,10 +519,17 @@ define_class!(
         fn row_view_for_row(
             &self,
             _table: &NSTableView,
-            _row: isize,
+            row: isize,
         ) -> Option<Retained<NSTableRowView>> {
-            let view = LcRowView::alloc(self.mtm());
-            let view: Retained<LcRowView> = unsafe { msg_send![view, init] };
+            let suppress = self
+                .ivars()
+                .results
+                .borrow()
+                .get(row as usize)
+                .map(|i| i.multiline)
+                .unwrap_or(false);
+            let view = LcRowView::alloc(self.mtm()).set_ivars(Cell::new(suppress));
+            let view: Retained<LcRowView> = unsafe { msg_send![super(view), init] };
             Some(Retained::into_super(view))
         }
 
@@ -488,9 +542,25 @@ define_class!(
             row: isize,
         ) -> Option<Retained<NSView>> {
             let results = self.ivars().results.borrow();
-            match results.get(row as usize) {
-                Some(item) => Some(make_row_cell(self.mtm(), item)),
-                None => None,
+            results
+                .get(row as usize)
+                .map(|item| make_row_cell(self.mtm(), item, row, self))
+        }
+
+        // Copy an AI answer card's full text to the clipboard (the card's copy
+        // button). The button's tag carries its row index.
+        #[unsafe(method(copyAnswer:))]
+        fn copy_answer(&self, sender: &NSButton) {
+            let row = sender.tag() as usize;
+            let text = {
+                let results = self.ivars().results.borrow();
+                match results.get(row).map(|i| &i.action) {
+                    Some(Action::CopyText(text)) => Some(text.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(text) = text {
+                clipboard::set_clipboard(&text);
             }
         }
 
@@ -511,7 +581,6 @@ define_class!(
 impl AppDelegate {
     fn toggle(&self) {
         let visible = self.ivars().visible.get();
-        eprintln!("[litecast] toggle (currently visible={visible})");
         if visible {
             self.hide_and_reset();
         } else {
@@ -549,7 +618,6 @@ impl AppDelegate {
     }
 
     fn show(&self) {
-        eprintln!("[litecast] show");
         let ivars = self.ivars();
 
         // Remember which app was frontmost before we steal focus, so window
@@ -588,6 +656,9 @@ impl AppDelegate {
         ivars.panel.makeKeyAndOrderFront(None);
         ivars.panel.makeFirstResponder(Some(&ivars.search));
         ivars.visible.set(true);
+        // Select the entire existing query so typing replaces it (Spotlight-style),
+        // while arrow keys still navigate results without clearing it.
+        self.select_all_search();
 
         // Subtle fade-in: start transparent and animate up to fully opaque. The
         // animator's final value is 1.0, so in normal operation the panel ends
@@ -660,6 +731,14 @@ impl AppDelegate {
         }
 
         let raw = ivars.search.stringValue().to_string();
+        // While the user is still typing an `@token` (no space yet), show the
+        // available shortcuts as autocomplete suggestions instead of results.
+        if ivars.screenshot_path.borrow().is_none() {
+            if let Some(partial) = parse_autocomplete_token(&raw) {
+                self.render_autocomplete(&partial);
+                return;
+            }
+        }
         // A typed `@token ` prefix sets the same sticky filter the chip uses,
         // and the remainder becomes the actual query.
         let query = match parse_filter_prefix(&raw) {
@@ -713,6 +792,11 @@ impl AppDelegate {
             self.render_recents();
             return;
         }
+        // On-demand critter: typing the easter-egg keyword sends one strolling
+        // immediately (the EasterEgg provider also returns a fun row).
+        if query.trim().eq_ignore_ascii_case("critter") {
+            self.start_critter_walk();
+        }
         let _ = ivars.query_tx.send((generation, query, filter));
     }
 
@@ -748,6 +832,16 @@ impl AppDelegate {
             next = count - 1;
         }
         self.select_row(next as usize);
+    }
+
+    /// Select the entire text in the search field (Spotlight-style), so the next
+    /// non-arrow keystroke overwrites the existing query. Safe on empty text.
+    fn select_all_search(&self) {
+        let ivars = self.ivars();
+        let sender: *const AnyObject = std::ptr::null();
+        unsafe {
+            let _: () = msg_send![&*ivars.search, selectText: sender];
+        }
     }
 
     fn select_row(&self, row: usize) {
@@ -808,6 +902,102 @@ impl AppDelegate {
         }
     }
 
+    /// Suggestions matching the partial `@token` the user has typed, best first.
+    /// An empty partial lists every shortcut in declaration order; otherwise they
+    /// are fuzzy-scored against the token.
+    fn autocomplete_matches(&self, partial: &str) -> Vec<(String, String)> {
+        let entries = &self.ivars().autocomplete;
+        if partial.is_empty() {
+            return entries
+                .iter()
+                .map(|e| (e.token.clone(), e.desc.clone()))
+                .collect();
+        }
+        let mut scored: Vec<(u32, &ShortcutEntry)> = entries
+            .iter()
+            .filter_map(|e| fuzzy_score(partial, &e.token).map(|s| (s, e)))
+            .collect();
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored
+            .into_iter()
+            .map(|(_, e)| (e.token.clone(), e.desc.clone()))
+            .collect()
+    }
+
+    /// Render the `@`-shortcut autocomplete list for the partial token, with the
+    /// nearest match selected on top and shown as an inline ghost in the field.
+    fn render_autocomplete(&self, partial: &str) {
+        let ivars = self.ivars();
+        let matches = self.autocomplete_matches(partial);
+
+        // Inline ghost: complete the field to the nearest match and select the
+        // appended suffix, so the next keystroke replaces it (Spotlight-style).
+        if let Some((best, _)) = matches.first() {
+            if !partial.is_empty() && best.len() > partial.len() && best.starts_with(partial) {
+                let full = format!("@{best}");
+                ivars.search.setStringValue(&NSString::from_str(&full));
+                if let Some(editor) = ivars.search.currentEditor() {
+                    let start = partial.chars().count() + 1; // past '@' + typed chars
+                    let len = best.chars().count() - partial.chars().count();
+                    unsafe {
+                        let _: () =
+                            msg_send![&*editor, setSelectedRange: NSRange::new(start, len)];
+                    }
+                }
+            }
+        }
+
+        let items: Vec<Item> = matches
+            .into_iter()
+            .map(|(token, desc)| {
+                Item::new(
+                    format!("@{token}"),
+                    desc,
+                    "Shortcut",
+                    0,
+                    Action::Autocomplete { token },
+                )
+            })
+            .collect();
+        let n = items.len();
+        *ivars.results.borrow_mut() = items;
+        ivars.table.reloadData();
+        self.layout(n);
+        if n > 0 {
+            self.select_row(0);
+        }
+    }
+
+    /// Complete the search field to `@token ` (ready for an argument) and re-run.
+    fn accept_autocomplete(&self, token: &str) {
+        let ivars = self.ivars();
+        let text = format!("@{token} ");
+        ivars.search.setStringValue(&NSString::from_str(&text));
+        if let Some(editor) = ivars.search.currentEditor() {
+            let end = text.chars().count();
+            unsafe {
+                let _: () = msg_send![&*editor, setSelectedRange: NSRange::new(end, 0)];
+            }
+        }
+        self.dispatch_query();
+    }
+
+    /// If an `@token` is being typed, accept its nearest match and return true.
+    /// Otherwise return false so the caller can fall back to Tab's normal action.
+    fn accept_nearest_autocomplete(&self) -> bool {
+        let raw = self.ivars().search.stringValue().to_string();
+        let Some(partial) = parse_autocomplete_token(&raw) else {
+            return false;
+        };
+        match self.autocomplete_matches(&partial).into_iter().next() {
+            Some((token, _)) => {
+                self.accept_autocomplete(&token);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Re-open the last AI interaction: restore its transcript, re-enter chat
     /// mode, and show the answer so the next keystroke continues the thread.
     fn resume_ai(&self) {
@@ -819,7 +1009,7 @@ impl AppDelegate {
         ivars.chat_active.set(true);
         ivars.search.setStringValue(&NSString::from_str(""));
         set_placeholder(&ivars.search, PLACEHOLDER_FOLLOWUP);
-        let items = answer_to_items(&la.answer);
+        let items = answer_to_items(self.mtm(), &la.answer);
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
@@ -855,6 +1045,10 @@ impl AppDelegate {
         }
         if let Action::ResumeAi = action {
             self.resume_ai();
+            return;
+        }
+        if let Action::Autocomplete { token } = action {
+            self.accept_autocomplete(&token);
             return;
         }
         // Window management: needs the main thread + Accessibility, handled here.
@@ -1031,7 +1225,7 @@ impl AppDelegate {
             .rev()
             .find(|m| matches!(m.role, ai::Role::Assistant))
         {
-            items.extend(answer_to_items(&answer.content));
+            items.extend(answer_to_items(self.mtm(), &answer.content));
         }
         if items.is_empty() {
             items.push(Item::new(
@@ -1078,7 +1272,7 @@ impl AppDelegate {
                     transcript,
                 });
                 set_placeholder(&ivars.search, PLACEHOLDER_FOLLOWUP);
-                answer_to_items(&answer)
+                answer_to_items(self.mtm(), &answer)
             }
             Err(err) => {
                 // Drop the failed turn so the transcript stays valid; leave chat.
@@ -1101,20 +1295,27 @@ impl AppDelegate {
     /// something always strolls across the panel out of the box.
     fn start_critter_walk(&self) {
         let ivars = self.ivars();
-        if !ivars.visible.get() {
+        if !ivars.critters_enabled || !ivars.visible.get() {
             return;
         }
         let idx = ivars.critter_idx.get();
         ivars.critter_idx.set(idx.wrapping_add(1));
 
         const SIZE: f64 = 30.0;
-        let start = NSRect::new(NSPoint::new(-SIZE, 2.0), NSSize::new(SIZE, SIZE));
+        // Sit just above the rounded bottom corners so the critter is never
+        // clipped and reads clearly along the bottom band.
+        const WALK_Y: f64 = 6.0;
+        let start = NSRect::new(NSPoint::new(-SIZE, WALK_Y), NSSize::new(SIZE, SIZE));
         let view: *const AnyObject = if ivars.critter_images.is_empty() {
             let glyph = DEFAULT_CRITTERS[idx % DEFAULT_CRITTERS.len()];
             let label = &ivars.critter_label;
             label.setStringValue(&NSString::from_str(glyph));
             label.setFrame(start);
             label.setHidden(false);
+            // Bring to the front so it renders over the results area.
+            if let Some(sv) = unsafe { label.superview() } {
+                sv.addSubview(label);
+            }
             &*ivars.critter_label as *const NSTextField as *const AnyObject
         } else {
             let image = &ivars.critter_images[idx % ivars.critter_images.len()];
@@ -1123,6 +1324,9 @@ impl AppDelegate {
             view.setAnimates(true);
             view.setHidden(false);
             view.setFrame(start);
+            if let Some(sv) = unsafe { view.superview() } {
+                sv.addSubview(view);
+            }
             &*ivars.critter_view as *const NSImageView as *const AnyObject
         };
 
@@ -1133,7 +1337,8 @@ impl AppDelegate {
             let ctx = NSAnimationContext::currentContext();
             ctx.setDuration(duration);
             let animator: Retained<AnyObject> = msg_send![obj, animator];
-            let _: () = msg_send![&animator, setFrameOrigin: NSPoint::new(PANEL_WIDTH + SIZE, 2.0)];
+            let _: () =
+                msg_send![&animator, setFrameOrigin: NSPoint::new(PANEL_WIDTH + SIZE, WALK_Y)];
             NSAnimationContext::endGrouping();
         }
 
@@ -1268,11 +1473,11 @@ fn preview(text: &str) -> String {
     }
 }
 
-/// Render an AI answer as a SINGLE multi-line "answer block" item: the whole
-/// reply is shown in one wrapping text view (sized to its wrapped height by
-/// `row_height_for`) rather than one tall launcher row per wrapped line. Enter
-/// still copies the full original answer.
-fn answer_to_items(answer: &str) -> Vec<Item> {
+/// Render an AI answer as a SINGLE rounded "answer card" item: the whole reply
+/// is shown in one wrapping text view inside a rounded container, sized exactly
+/// to its wrapped height (measured here on the main thread). Enter (or the
+/// card's copy button) copies the full original answer.
+fn answer_to_items(mtm: MainThreadMarker, answer: &str) -> Vec<Item> {
     let full = answer.trim().to_string();
     let body = clean_answer_text(&full);
     let display = if body.is_empty() {
@@ -1280,25 +1485,66 @@ fn answer_to_items(answer: &str) -> Vec<Item> {
     } else {
         body
     };
+    let text_h = measure_answer_text_height(mtm, &display);
+    let card_h = (text_h + 2.0 * CARD_PAD).max(CARD_MIN_H);
+    let block_h = (card_h + 2.0 * CARD_MARGIN_Y).ceil();
     let mut item = Item::new(display, "", "AI", 0, Action::CopyText(full));
     item.multiline = true;
+    item.block_height = Some(block_h);
     vec![item]
 }
 
+/// Width available to the wrapping answer text inside the card (used for both
+/// measuring the height and laying out the label so they match exactly).
+fn answer_text_width() -> f64 {
+    let card_w = PANEL_WIDTH - 2.0 * CARD_MARGIN_X;
+    (card_w - ANSWER_TEXT_LEFT - CARD_PAD - ANSWER_TEXT_RIGHT_RESERVE).max(80.0)
+}
+
+/// Measure the wrapped height of the answer text at the card's text width by
+/// laying out an off-screen multi-line label and reading its fitting size.
+fn measure_answer_text_height(mtm: MainThreadMarker, text: &str) -> f64 {
+    let text_w = answer_text_width();
+    let label = make_answer_label(mtm, text);
+    label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(text_w, 10_000.0),
+    ));
+    unsafe {
+        let _: () = msg_send![&*label, setPreferredMaxLayoutWidth: text_w];
+    }
+    let size: NSSize = unsafe { msg_send![&*label, fittingSize] };
+    size.height.ceil().max(line_height(ANSWER_FONT_SIZE, false))
+}
+
+/// Build the wrapping, multi-line label used for an AI answer card.
+fn make_answer_label(mtm: MainThreadMarker, text: &str) -> Retained<NSTextField> {
+    let label = make_label(
+        mtm,
+        text,
+        ANSWER_FONT_SIZE,
+        weight_regular(),
+        &NSColor::labelColor(),
+    );
+    label.setUsesSingleLineMode(false);
+    label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
+    label.setMaximumNumberOfLines(0);
+    label
+}
+
 /// Height a result row occupies. Normal rows are a fixed `ROW_H`; an AI answer
-/// block is sized to its wrapped text (tight line height + vertical padding).
+/// card uses the height precomputed (and measured) in `answer_to_items`.
 fn row_height_for(item: &Item) -> f64 {
     if item.multiline {
-        let lines = item.title.lines().count().max(1) as f64;
-        (lines * line_height(ANSWER_FONT_SIZE, false) + 2.0 * ANSWER_PAD_V).ceil()
+        item.block_height.unwrap_or(ROW_H)
     } else {
         ROW_H
     }
 }
 
-/// Lightly de-markdown an answer and hard-wrap it to `ANSWER_WRAP` columns so it
-/// reads as a clean paragraph block. Runs of blank lines collapse to a single
-/// separator (so there are no empty rows), and leading/trailing blanks drop.
+/// Lightly de-markdown an answer so it reads as clean text: strip `#` headings,
+/// turn `-`/`*` bullets into `•`, drop `**`/`` ` `` emphasis, and collapse runs
+/// of blank lines to a single separator. Soft wrapping is left to the text view.
 fn clean_answer_text(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut prev_blank = true; // suppress leading blank lines
@@ -1312,29 +1558,12 @@ fn clean_answer_text(text: &str) -> String {
             continue;
         }
         prev_blank = false;
-        wrap_line(&line, ANSWER_WRAP, &mut out);
+        out.push(line);
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
     }
     out.join("\n")
-}
-
-/// Word-wrap a single logical line into `out` at `wrap` columns (by char count).
-fn wrap_line(line: &str, wrap: usize, out: &mut Vec<String>) {
-    let mut current = String::new();
-    for word in line.split_whitespace() {
-        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > wrap {
-            out.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
 }
 
 /// Strip the most common markdown markers so an answer renders as clean plain
@@ -1395,6 +1624,61 @@ fn parse_filter_prefix(raw: &str) -> Option<(Filter, String)> {
     };
     let filter = Filter::from_token(&token.to_ascii_lowercase())?;
     Some((filter, after.to_string()))
+}
+
+/// Parse a partial `@token` the user is still typing (no whitespace yet),
+/// returning the lowercase text after `@`. `@` alone yields `""` (list all);
+/// once a space follows the token this returns `None` (normal query handling).
+fn parse_autocomplete_token(raw: &str) -> Option<String> {
+    let rest = raw.trim_start().strip_prefix('@')?;
+    if rest.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.to_ascii_lowercase())
+}
+
+/// The canonical `@token` (without `@`) for a category filter.
+fn filter_token(filter: Filter) -> &'static str {
+    match filter {
+        Filter::All => "all",
+        Filter::Apps => "apps",
+        Filter::Files => "files",
+        Filter::Clip => "clip",
+        Filter::Calc => "calc",
+        Filter::Web => "web",
+        Filter::Cmd => "cmd",
+        Filter::Emoji => "emoji",
+        Filter::Ai => "ai",
+    }
+}
+
+/// Build the `@`-shortcut suggestion list: category filters first, then app
+/// commands (built-ins + user-defined).
+fn build_autocomplete(app_commands: &[AppCommandConfig]) -> Vec<ShortcutEntry> {
+    let mut out: Vec<ShortcutEntry> = Vec::new();
+    for filter in Filter::CYCLE {
+        if filter == Filter::All {
+            continue;
+        }
+        out.push(ShortcutEntry {
+            token: filter_token(filter).to_string(),
+            desc: format!("Filter: {}", filter.label()),
+        });
+    }
+    for cmd in app_commands {
+        let desc = if !cmd.subtitle.is_empty() {
+            cmd.subtitle.clone()
+        } else if !cmd.name.is_empty() {
+            cmd.name.clone()
+        } else {
+            format!("Run @{}", cmd.keyword)
+        };
+        out.push(ShortcutEntry {
+            token: cmd.keyword.clone(),
+            desc,
+        });
+    }
+    out
 }
 
 /// Exact line height for the system font at `size`. A single-line NSTextField
@@ -1544,6 +1828,7 @@ fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
         "Plugin" => "puzzlepiece.extension",
         "Window" => "macwindow",
         "Proc" => "bolt.horizontal.circle",
+        "Shortcut" => "at",
         "?" => "wand.and.stars",
         _ => "magnifyingglass",
     };
@@ -1575,7 +1860,12 @@ fn source_tag(source: &str) -> Option<&'static str> {
     }
 }
 
-fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
+fn make_row_cell(
+    mtm: MainThreadMarker,
+    item: &Item,
+    row: isize,
+    target: &AppDelegate,
+) -> Retained<NSView> {
     let width = PANEL_WIDTH;
     let height = row_height_for(item);
     let container = NSView::initWithFrame(
@@ -1583,39 +1873,103 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)),
     );
 
-    // AI answer block: a single wrapping multi-line text view with one sparkle
-    // icon at the top, instead of one tall launcher row per wrapped line.
+    // AI answer card: one rounded container holding a leading sparkle accent, a
+    // single wrapping text view, and a copy button in the top-right corner.
     if item.multiline {
-        let icon_view = NSImageView::initWithFrame(
-            NSImageView::alloc(mtm),
+        let card_w = width - 2.0 * CARD_MARGIN_X;
+        let card_h = height - 2.0 * CARD_MARGIN_Y;
+        let card = NSView::initWithFrame(
+            NSView::alloc(mtm),
             NSRect::new(
-                NSPoint::new(SIDE_INSET, height - ANSWER_PAD_V - ROW_ICON),
-                NSSize::new(ROW_ICON, ROW_ICON),
+                NSPoint::new(CARD_MARGIN_X, CARD_MARGIN_Y),
+                NSSize::new(card_w, card_h),
             ),
         );
-        if let Some(image) = row_icon(item) {
-            icon_view.setImage(Some(&image));
+        card.setWantsLayer(true);
+        if let Some(layer) = card.layer() {
+            let fill = NSColor::labelColor().colorWithAlphaComponent(0.06);
+            let border = NSColor::labelColor().colorWithAlphaComponent(0.10);
+            unsafe {
+                let fill_cg: *mut AnyObject = msg_send![&*fill, CGColor];
+                let border_cg: *mut AnyObject = msg_send![&*border, CGColor];
+                let _: () = msg_send![&*layer, setCornerRadius: 12.0_f64];
+                let _: () = msg_send![&*layer, setMasksToBounds: true];
+                let _: () = msg_send![&*layer, setBackgroundColor: fill_cg];
+                let _: () = msg_send![&*layer, setBorderWidth: 1.0_f64];
+                let _: () = msg_send![&*layer, setBorderColor: border_cg];
+            }
         }
-        icon_view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
-        container.addSubview(&icon_view);
 
-        let text_x = SIDE_INSET + ROW_ICON + 12.0;
-        let text_w = (width - SIDE_INSET - text_x).max(40.0);
-        let label = make_label(
-            mtm,
-            &item.title,
-            ANSWER_FONT_SIZE,
-            weight_regular(),
-            &NSColor::labelColor(),
+        // Leading sparkle accent, pinned at the top-left of the card content.
+        let accent = NSImageView::initWithFrame(
+            NSImageView::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(CARD_PAD, card_h - CARD_PAD - ANSWER_ACCENT),
+                NSSize::new(ANSWER_ACCENT, ANSWER_ACCENT),
+            ),
         );
-        label.setUsesSingleLineMode(false);
-        label.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
-        label.setMaximumNumberOfLines(0);
+        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("sparkles"),
+            None,
+        ) {
+            accent.setImage(Some(&image));
+        }
+        accent.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+        accent.setContentTintColor(Some(&NSColor::controlAccentColor()));
+        card.addSubview(&accent);
+
+        // Wrapping answer text, sized to the height measured in answer_to_items.
+        let text_w = answer_text_width();
+        let label = make_answer_label(mtm, &item.title);
         label.setFrame(NSRect::new(
-            NSPoint::new(text_x, ANSWER_PAD_V),
-            NSSize::new(text_w, height - 2.0 * ANSWER_PAD_V),
+            NSPoint::new(ANSWER_TEXT_LEFT, CARD_PAD),
+            NSSize::new(text_w, card_h - 2.0 * CARD_PAD),
         ));
-        container.addSubview(&label);
+        card.addSubview(&label);
+
+        // Copy button in the top-right corner.
+        let copy = NSButton::initWithFrame(
+            NSButton::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(card_w - CARD_PAD - ANSWER_COPY, card_h - CARD_PAD - ANSWER_COPY),
+                NSSize::new(ANSWER_COPY, ANSWER_COPY),
+            ),
+        );
+        copy.setButtonType(NSButtonType::MomentaryChange);
+        copy.setBordered(false);
+        copy.setBezelStyle(NSBezelStyle::Circular);
+        copy.setTitle(&NSString::from_str(""));
+        copy.setFocusRingType(NSFocusRingType::None);
+        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("doc.on.doc"),
+            None,
+        ) {
+            copy.setImage(Some(&image));
+        }
+        copy.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageOnly);
+        copy.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        copy.setTag(row);
+        unsafe {
+            let obj: &AnyObject = target;
+            copy.setTarget(Some(obj));
+            copy.setAction(Some(sel!(copyAnswer:)));
+        }
+        card.addSubview(&copy);
+
+        // Faint source attribution in the bottom-right corner (e.g. "AI").
+        if let Some(tag_text) = source_tag(item.source) {
+            let attr = make_label(mtm, tag_text, 10.0, weight_regular(), &NSColor::tertiaryLabelColor());
+            attr.sizeToFit();
+            let aw = attr.frame().size.width;
+            let ah = line_height(10.0, false);
+            attr.setFrame(NSRect::new(
+                NSPoint::new(card_w - CARD_PAD - aw, CARD_PAD - ah * 0.5),
+                NSSize::new(aw, ah),
+            ));
+            card.addSubview(&attr);
+        }
+
+        container.addSubview(&card);
         return container;
     }
 
@@ -1636,7 +1990,9 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
 
     let text_x = SIDE_INSET + ROW_ICON + 12.0;
 
-    // Optional right-aligned source tag (e.g. "App", "Calc"), like Raycast.
+    // Optional right-aligned source tag (e.g. "App", "File"). It must sit
+    // comfortably INSIDE the inset selection highlight, so its right edge is
+    // pinned a fixed inset in from the highlight's right edge (not the row edge).
     let mut right_edge = width - SIDE_INSET;
     if let Some(tag_text) = source_tag(item.source) {
         let tag = make_label(
@@ -1649,7 +2005,8 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
         tag.sizeToFit();
         let tag_w = tag.frame().size.width;
         let tag_h = line_height(11.0, false);
-        let tag_x = width - SIDE_INSET - tag_w;
+        let tag_right = width - SELECTION_INSET_X - TAG_RIGHT_INSET;
+        let tag_x = tag_right - tag_w;
         let tag_y = ((ROW_H - tag_h) / 2.0).round();
         tag.setFrame(NSRect::new(
             NSPoint::new(tag_x, tag_y),
@@ -1791,6 +2148,11 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     scroll.setDocumentView(Some(&table));
     scroll.setHasVerticalScroller(true);
     scroll.setDrawsBackground(false);
+    // Overlay scrollers (style = 1) float over content instead of insetting it,
+    // so rows keep the full panel width and the source tag stays inside the row.
+    unsafe {
+        let _: () = msg_send![&*scroll, setScrollerStyle: 1_isize];
+    }
 
     // Native hairline separator between the search field and results.
     let separator = NSBox::initWithFrame(
@@ -1964,6 +2326,23 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
         Box::new(CommandsProvider::new(config.commands.clone())),
         Filter::Cmd,
     );
+    // App commands are `@keyword`-namespaced; `@` is not a category token, so
+    // the raw `@keyword arg` query reaches this provider under `All` (and Cmd).
+    let app_commands = config::merged_app_commands(&config.app_commands);
+    engine.add(
+        Box::new(AppCommandsProvider::new(
+            app_commands.clone(),
+            config.web_search_url.clone(),
+        )),
+        Filter::All,
+    );
+    engine.add(
+        Box::new(AppCommandsProvider::new(
+            app_commands,
+            config.web_search_url.clone(),
+        )),
+        Filter::Cmd,
+    );
     engine.add(
         Box::new(QuicklinksProvider::new(config.quicklinks.clone())),
         Filter::Cmd,
@@ -2028,21 +2407,11 @@ fn main() {
     let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
     let toggle_hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
     let shot_hotkey = HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
-    match manager.register(toggle_hotkey) {
-        Ok(()) => eprintln!(
-            "[litecast] registered toggle hotkey Option+Space (id={})",
-            toggle_hotkey.id()
-        ),
-        Err(e) => eprintln!("[litecast] FAILED to register toggle hotkey Option+Space: {e}"),
+    if let Err(e) = manager.register(toggle_hotkey) {
+        eprintln!("[litecast] failed to register toggle hotkey Option+Space: {e}");
     }
-    match manager.register(shot_hotkey) {
-        Ok(()) => eprintln!(
-            "[litecast] registered screenshot hotkey Option+Shift+Space (id={})",
-            shot_hotkey.id()
-        ),
-        Err(e) => {
-            eprintln!("[litecast] FAILED to register screenshot hotkey Option+Shift+Space: {e}")
-        }
+    if let Err(e) = manager.register(shot_hotkey) {
+        eprintln!("[litecast] failed to register screenshot hotkey Option+Shift+Space: {e}");
     }
     let toggle_id = toggle_hotkey.id();
     let shot_id = shot_hotkey.id();
@@ -2065,14 +2434,9 @@ fn main() {
         };
         match manager.register(parsed) {
             Ok(()) => {
-                eprintln!(
-                    "[litecast] registered custom hotkey {} (id={})",
-                    hk.key,
-                    parsed.id()
-                );
                 hotkey_actions.insert(parsed.id(), action);
             }
-            Err(e) => eprintln!("[litecast] FAILED to register custom hotkey {}: {e}", hk.key),
+            Err(e) => eprintln!("[litecast] failed to register custom hotkey {}: {e}", hk.key),
         }
     }
 
@@ -2108,11 +2472,13 @@ fn main() {
         shot_pending: Arc::new(Mutex::new(None)),
         playful_placeholders: config.ui.playful_placeholders,
         placeholder_idx: Cell::new(0),
+        critters_enabled: config.ui.critters,
         critter_view: critter,
         critter_label,
         critter_images,
         critter_idx: Cell::new(0),
         frecency: frecency.clone(),
+        autocomplete: build_autocomplete(&config::merged_app_commands(&config.app_commands)),
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
         _hotkey_manager: manager,
@@ -2184,10 +2550,6 @@ fn main() {
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {
-            eprintln!(
-                "[litecast] hotkey event id={} state={:?}",
-                event.id, event.state
-            );
             if event.state != HotKeyState::Pressed {
                 continue;
             }
