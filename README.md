@@ -19,7 +19,13 @@ so it stays fast and lean.
 - Global hotkey to toggle the search panel.
 - Fuzzy app launcher.
 - File search (backed by the macOS Spotlight index via `mdfind`).
+- Frecency ranking - frequently and recently used items drift to the top.
 - Inline calculator (hand-rolled evaluator).
+- Unit & currency conversion (`10 km in mi`, `100 usd to eur`).
+- System commands (lock, sleep, dark mode, Wi-Fi, empty trash, restart, ...).
+- Emoji & symbol picker (the `emoji` keyword or a `:` prefix).
+- Text snippets (the `snip` keyword).
+- Quicklinks - parameterized `{query}` URLs.
 - Web-search fallback (opens the default browser).
 - Clipboard history (the `clip` keyword).
 - User-defined custom commands + an external [plugin protocol](docs/plugins.md).
@@ -38,10 +44,18 @@ Open the panel and start typing:
 
 - Type an app or file name to launch/open it.
 - Type a math expression (e.g. `12 * (3 + 4)`) for an instant result.
+- Convert units or currency: `10 km in mi`, `100 f to c`, `100 usd to eur`.
+- Search a system command by name: `lock`, `sleep`, `dark`, `wi-fi`, `trash`, ...
+  Destructive ones (empty trash, restart, shut down) need a second `Enter` to confirm.
+- Type `emoji fire` or `:fire` to find and copy an emoji/symbol.
+- Type `snip` to browse text snippets (or a snippet's own keyword); `Enter` copies it.
+- Use a quicklink keyword with an argument (e.g. `ghr rust-lang/rust`).
 - Type `clip` to browse clipboard history (`clip foo` to filter).
 - Type `? your question` to ask the configured AI backend.
 - Type `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
 - Anything else offers a web search.
+
+Frequently and recently activated results are automatically boosted toward the top.
 
 Arrow keys move the selection, `Enter` activates, `Esc` dismisses.
 
@@ -53,9 +67,21 @@ A commented config file is created on first run at:
 ~/Library/Application Support/litecast/config.toml
 ```
 
-It controls the web-search URL, custom commands, AI backend (provider/model/endpoint),
-and UI toggles. Plugins go in `.../litecast/plugins/` (see [docs/plugins.md](docs/plugins.md)),
-and wandering-critter GIFs go in `.../litecast/critters/`.
+It controls the web-search URL, custom commands, quicklinks, text snippets,
+unit/currency conversion, the AI backend (provider/model/endpoint), and UI
+toggles. Plugins go in `.../litecast/plugins/` (see [docs/plugins.md](docs/plugins.md)),
+and wandering-critter GIFs go in `.../litecast/critters/`. The support dir also
+holds learned usage (`usage.json`) and cached currency rates (`currency.json`).
+
+See [docs/features.md](docs/features.md) for the full list of keywords and
+config sections.
+
+### System command permissions
+
+Lock screen, sleep, and Wi-Fi toggle need no permission. Toggle Dark Mode,
+Empty Trash, Restart, and Shut Down use AppleScript, so macOS shows a one-time
+**Automation** prompt the first time each is used. Toggle Bluetooth only appears
+if the optional [`blueutil`](https://github.com/toy/blueutil) CLI is installed.
 
 ## Permissions
 
