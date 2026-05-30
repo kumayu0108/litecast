@@ -313,6 +313,11 @@ struct Ivars {
     /// Available `@`-shortcut suggestions (filters + app commands), shown while
     /// the user is typing an `@token`.
     autocomplete: Vec<ShortcutEntry>,
+    /// Set when the last edit was a Backspace/Delete, so the `@token`
+    /// autocomplete does NOT re-fill the inline ghost suffix on that change
+    /// (otherwise deleting a char would be immediately re-completed, making
+    /// Backspace appear to do nothing). Consumed once per text change.
+    suppress_ghost: Cell<bool>,
     /// PID of the app that was frontmost just before the panel opened. Window
     /// commands target this app's focused window (since opening the panel makes
     /// litecast itself frontmost). -1 when unknown.
@@ -467,7 +472,18 @@ define_class!(
             _text_view: &AnyObject,
             selector: Sel,
         ) -> bool {
-            if selector == sel!(moveDown:) {
+            // Backspace/Delete: never intercept (always edit text normally), but
+            // remember that this edit was a deletion so the `@token` autocomplete
+            // does not immediately re-complete the char we just removed.
+            if selector == sel!(deleteBackward:)
+                || selector == sel!(deleteForward:)
+                || selector == sel!(deleteWordBackward:)
+                || selector == sel!(deleteWordForward:)
+                || selector == sel!(deleteToBeginningOfLine:)
+            {
+                self.ivars().suppress_ghost.set(true);
+                false
+            } else if selector == sel!(moveDown:) {
                 self.move_selection(1);
                 true
             } else if selector == sel!(moveUp:) {
@@ -732,12 +748,15 @@ impl AppDelegate {
             return;
         }
 
+        // Consume the "last edit was a deletion" flag exactly once per change.
+        let suppress_ghost = ivars.suppress_ghost.replace(false);
+
         let raw = ivars.search.stringValue().to_string();
         // While the user is still typing an `@token` (no space yet), show the
         // available shortcuts as autocomplete suggestions instead of results.
         if ivars.screenshot_path.borrow().is_none() {
             if let Some(partial) = parse_autocomplete_token(&raw) {
-                self.render_autocomplete(&partial);
+                self.render_autocomplete(&partial, suppress_ghost);
                 return;
             }
         }
@@ -932,14 +951,20 @@ impl AppDelegate {
 
     /// Render the `@`-shortcut autocomplete list for the partial token, with the
     /// nearest match selected on top and shown as an inline ghost in the field.
-    fn render_autocomplete(&self, partial: &str) {
+    /// When `suppress_ghost` is set (the edit was a Backspace/Delete), the inline
+    /// ghost is skipped so the deletion is not instantly re-completed.
+    fn render_autocomplete(&self, partial: &str, suppress_ghost: bool) {
         let ivars = self.ivars();
         let matches = self.autocomplete_matches(partial);
 
         // Inline ghost: complete the field to the nearest match and select the
         // appended suffix, so the next keystroke replaces it (Spotlight-style).
         if let Some((best, _)) = matches.first() {
-            if !partial.is_empty() && best.len() > partial.len() && best.starts_with(partial) {
+            if !suppress_ghost
+                && !partial.is_empty()
+                && best.len() > partial.len()
+                && best.starts_with(partial)
+            {
                 let full = format!("@{best}");
                 ivars.search.setStringValue(&NSString::from_str(&full));
                 if let Some(editor) = ivars.search.currentEditor() {
@@ -2509,6 +2534,7 @@ fn main() {
         critter_idx: Cell::new(0),
         frecency: frecency.clone(),
         autocomplete: build_autocomplete(&config::merged_app_commands(&config.app_commands)),
+        suppress_ghost: Cell::new(false),
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
         _hotkey_manager: manager,
