@@ -61,7 +61,17 @@ type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 720.0;
-const SEARCH_AREA_H: f64 = 66.0;
+const SEARCH_AREA_H: f64 = 72.0;
+// Spotlight-style rounded "pill" search field: a soft capsule with a leading
+// magnifier glyph and generous padding around the typed text.
+const SEARCH_PILL_H: f64 = 48.0;
+const SEARCH_ICON: f64 = 19.0;
+// Point size of the typed query text.
+const SEARCH_FONT_SIZE: f64 = 22.0;
+// Inset of the magnifier glyph from the pill's left edge, and the gap from the
+// glyph to where the text begins.
+const SEARCH_PILL_PAD_X: f64 = 16.0;
+const SEARCH_ICON_GAP: f64 = 11.0;
 // Spotlight-style category chip row that sits in its own band under the search
 // field. Chips are clickable and stay in sync with Tab-cycle and @prefix.
 const CHIP_ROW_H: f64 = 40.0;
@@ -263,6 +273,10 @@ struct ShortcutEntry {
 struct Ivars {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
+    /// Rounded "pill" background behind the search field (Spotlight-style).
+    search_bg: Retained<NSView>,
+    /// Leading magnifier glyph inside the search pill.
+    search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
     separator: Retained<NSBox>,
@@ -1481,17 +1495,35 @@ impl AppDelegate {
             chip_x += chip_w + CHIP_GAP;
         }
 
-        // Search field sized to its exact text height and centered in the top
-        // search area (which sits above the chip row), so the text lands on the
-        // vertical midline (a tall field would top-align its text instead).
-        let search_h = line_height(24.0, false);
-        let search_y =
-            (band_bottom + CHIP_ROW_H + (SEARCH_AREA_H - search_h) / 2.0).round();
-        let search_frame = NSRect::new(
-            NSPoint::new(SIDE_INSET, search_y),
-            NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, search_h),
-        );
-        ivars.search.setFrame(search_frame);
+        // Spotlight-style search pill, centered in the top search band (which
+        // sits above the chip row). The pill spans the shared side margins; the
+        // magnifier glyph and the text field are vertically centered inside it.
+        let search_area_bottom = band_bottom + CHIP_ROW_H;
+        let pill_x = SIDE_INSET;
+        let pill_w = PANEL_WIDTH - 2.0 * SIDE_INSET;
+        let pill_y = (search_area_bottom + (SEARCH_AREA_H - SEARCH_PILL_H) / 2.0).round();
+        ivars.search_bg.setFrame(NSRect::new(
+            NSPoint::new(pill_x, pill_y),
+            NSSize::new(pill_w, SEARCH_PILL_H),
+        ));
+
+        let icon_x = pill_x + SEARCH_PILL_PAD_X;
+        let icon_y = (pill_y + (SEARCH_PILL_H - SEARCH_ICON) / 2.0).round();
+        ivars.search_icon.setFrame(NSRect::new(
+            NSPoint::new(icon_x, icon_y),
+            NSSize::new(SEARCH_ICON, SEARCH_ICON),
+        ));
+
+        // Text field sized to its exact text height and centered in the pill, so
+        // the text lands on the pill's vertical midline.
+        let search_h = line_height(SEARCH_FONT_SIZE, false);
+        let text_x = icon_x + SEARCH_ICON + SEARCH_ICON_GAP;
+        let search_y = (pill_y + (SEARCH_PILL_H - search_h) / 2.0).round();
+        let search_w = (pill_x + pill_w - SEARCH_PILL_PAD_X - text_x).max(40.0);
+        ivars.search.setFrame(NSRect::new(
+            NSPoint::new(text_x, search_y),
+            NSSize::new(search_w, search_h),
+        ));
 
         // Hairline separator on the boundary between the search area and results.
         let separator_frame = NSRect::new(
@@ -1769,7 +1801,7 @@ fn set_placeholder(field: &NSTextField, text: &str) {
     let s = NSString::from_str(text);
     let font = NSFont::systemFontOfSize(PLACEHOLDER_FONT_SIZE);
     let color = NSColor::placeholderTextColor();
-    let delta = (line_height(24.0, false) - line_height(PLACEHOLDER_FONT_SIZE, false)) / 2.0;
+    let delta = (line_height(SEARCH_FONT_SIZE, false) - line_height(PLACEHOLDER_FONT_SIZE, false)) / 2.0;
     let offset = NSNumber::numberWithDouble(-delta);
     let keys: [&NSString; 3] = [
         unsafe { NSFontAttributeName },
@@ -2119,6 +2151,8 @@ fn make_row_cell(
 struct PanelViews {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
+    search_bg: Retained<NSView>,
+    search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
     separator: Retained<NSBox>,
@@ -2174,6 +2208,42 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
             | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
     );
 
+    // Spotlight-style rounded pill background behind the search field. Sized and
+    // positioned in `layout`; here we just establish its look (soft fill +
+    // hairline border, fully rounded ends).
+    let search_bg = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, SEARCH_PILL_H)),
+    );
+    search_bg.setWantsLayer(true);
+    if let Some(layer) = search_bg.layer() {
+        let fill = NSColor::labelColor().colorWithAlphaComponent(0.07);
+        let border = NSColor::labelColor().colorWithAlphaComponent(0.10);
+        unsafe {
+            let fill_cg: *mut AnyObject = msg_send![&*fill, CGColor];
+            let border_cg: *mut AnyObject = msg_send![&*border, CGColor];
+            let _: () = msg_send![&*layer, setCornerRadius: SEARCH_PILL_H / 2.0];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
+            let _: () = msg_send![&*layer, setBackgroundColor: fill_cg];
+            let _: () = msg_send![&*layer, setBorderWidth: 1.0_f64];
+            let _: () = msg_send![&*layer, setBorderColor: border_cg];
+        }
+    }
+
+    // Leading magnifier glyph inside the pill.
+    let search_icon = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SEARCH_ICON, SEARCH_ICON)),
+    );
+    if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("magnifyingglass"),
+        None,
+    ) {
+        search_icon.setImage(Some(&image));
+    }
+    search_icon.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+    search_icon.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+
     // Borderless, transparent, large text field for a native Spotlight feel.
     let search_rect = NSRect::new(
         NSPoint::new(SIDE_INSET, 14.0),
@@ -2186,7 +2256,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     search.setEditable(true);
     search.setSelectable(true);
     search.setFocusRingType(NSFocusRingType::None);
-    search.setFont(Some(&NSFont::systemFontOfSize(24.0)));
+    search.setFont(Some(&NSFont::systemFontOfSize(SEARCH_FONT_SIZE)));
     set_placeholder(&search, PLACEHOLDER_NORMAL);
 
     // Results table inside a scroll view.
@@ -2255,6 +2325,10 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     critter_label.setHidden(true);
     critter_label.setFont(Some(&NSFont::systemFontOfSize(22.0)));
 
+    // Pill background sits behind the field + icon; add it first so it draws
+    // underneath them.
+    effect.addSubview(&search_bg);
+    effect.addSubview(&search_icon);
     effect.addSubview(&search);
     effect.addSubview(&scroll);
     effect.addSubview(&separator);
@@ -2268,6 +2342,8 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     PanelViews {
         panel,
         search,
+        search_bg,
+        search_icon,
         table,
         scroll,
         separator,
@@ -2467,6 +2543,8 @@ fn main() {
     let PanelViews {
         panel,
         search,
+        search_bg,
+        search_icon,
         table,
         scroll,
         separator,
@@ -2563,6 +2641,8 @@ fn main() {
     let ivars = Ivars {
         panel,
         search,
+        search_bg,
+        search_icon,
         table,
         scroll,
         separator,
