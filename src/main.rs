@@ -5,6 +5,7 @@ mod engine;
 mod model;
 mod paths;
 mod providers;
+mod screenshot;
 mod secrets;
 
 use std::cell::{Cell, RefCell};
@@ -43,6 +44,8 @@ type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 680.0;
 const SEARCH_AREA_H: f64 = 64.0;
+const PLACEHOLDER_NORMAL: &str = "Search litecast...";
+const PLACEHOLDER_SHOT: &str = "Ask about the screenshot, then press Enter...";
 const ROW_H: f64 = 44.0;
 const MAX_VISIBLE_ROWS: usize = 8;
 // Fraction of the screen height where the panel's top edge sits.
@@ -91,6 +94,10 @@ struct Ivars {
     ai_pending: AiPending,
     /// Monotonic AI request id; stale answers are discarded.
     ai_generation: Cell<u64>,
+    /// Active screenshot path while in "ask about screenshot" mode.
+    screenshot_path: RefCell<Option<String>>,
+    /// Captured screenshot path awaiting the main thread.
+    shot_pending: Arc<Mutex<Option<String>>>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -138,6 +145,45 @@ define_class!(
         #[unsafe(method(applyAiAnswer))]
         fn apply_ai_answer(&self) {
             self.apply_pending_ai_answer();
+        }
+
+        // Triggered by the screenshot hotkey. Captures off the main thread so
+        // the interactive selection UI is not blocked.
+        #[unsafe(method(captureScreenshot))]
+        fn capture_screenshot(&self) {
+            let pending = self.ivars().shot_pending.clone();
+            let delegate_addr = self as *const AppDelegate as usize;
+            std::thread::spawn(move || {
+                if let Some(path) = screenshot::capture_interactive() {
+                    if let Ok(mut slot) = pending.lock() {
+                        *slot = Some(path);
+                    }
+                    let ptr = delegate_addr as *const AnyObject;
+                    unsafe {
+                        let obj: &AnyObject = &*ptr;
+                        let _: () = msg_send![
+                            obj,
+                            performSelectorOnMainThread: sel!(showScreenshot),
+                            withObject: std::ptr::null::<AnyObject>(),
+                            waitUntilDone: false,
+                        ];
+                    }
+                }
+            });
+        }
+
+        // Enter "ask about screenshot" mode on the main thread.
+        #[unsafe(method(showScreenshot))]
+        fn show_screenshot(&self) {
+            let path = self.ivars().shot_pending.lock().ok().and_then(|mut s| s.take());
+            let Some(path) = path else { return };
+            *self.ivars().screenshot_path.borrow_mut() = Some(path);
+            self.ivars()
+                .search
+                .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_SHOT)));
+            self.ivars().search.setStringValue(&NSString::from_str(""));
+            self.show();
+            self.dispatch_query();
         }
 
         // Repeating timer: record clipboard changes into history. Only does work
@@ -237,6 +283,10 @@ impl AppDelegate {
         ivars.generation.set(ivars.generation.get().wrapping_add(1));
         // Clear state for the next invocation.
         ivars.search.setStringValue(&NSString::from_str(""));
+        ivars.screenshot_path.borrow_mut().take();
+        ivars
+            .search
+            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
     }
@@ -246,6 +296,37 @@ impl AppDelegate {
         let query = ivars.search.stringValue().to_string();
         let generation = ivars.generation.get().wrapping_add(1);
         ivars.generation.set(generation);
+
+        // In screenshot mode the whole query is a question about the image; we
+        // bypass the providers and offer a single "ask" action.
+        if let Some(path) = ivars.screenshot_path.borrow().clone() {
+            let prompt = query.trim();
+            let item = if prompt.is_empty() {
+                Item::new(
+                    "Ask about the screenshot...",
+                    "Type a question, then press Enter",
+                    "AI",
+                    0,
+                    Action::None,
+                )
+            } else {
+                Item::new(
+                    format!("Ask {}: {prompt}", ivars.ai_config.provider),
+                    "Press Enter to send the screenshot + question",
+                    "AI",
+                    0,
+                    Action::AskAi {
+                        prompt: prompt.to_string(),
+                        image: Some(path),
+                    },
+                )
+            };
+            *ivars.results.borrow_mut() = vec![item];
+            ivars.table.reloadData();
+            self.layout(1);
+            self.select_row(0);
+            return;
+        }
 
         if query.trim().is_empty() {
             ivars.results.borrow_mut().clear();
@@ -325,6 +406,11 @@ impl AppDelegate {
     /// Kick off an AI request on a background thread and show a loading state.
     fn start_ai(&self, prompt: String, image: Option<String>) {
         let ivars = self.ivars();
+        // Leaving screenshot mode now that the question has been sent.
+        ivars.screenshot_path.borrow_mut().take();
+        ivars
+            .search
+            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
         let generation = ivars.ai_generation.get().wrapping_add(1);
         ivars.ai_generation.set(generation);
 
@@ -591,8 +677,16 @@ fn main() {
     let (panel, search, table, scroll) = build_panel(mtm);
 
     let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-    manager.register(hotkey).expect("failed to register hotkey");
+    let toggle_hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
+    let shot_hotkey = HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
+    manager
+        .register(toggle_hotkey)
+        .expect("failed to register toggle hotkey");
+    manager
+        .register(shot_hotkey)
+        .expect("failed to register screenshot hotkey");
+    let toggle_id = toggle_hotkey.id();
+    let shot_id = shot_hotkey.id();
 
     let config = config::load();
     let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
@@ -614,6 +708,8 @@ fn main() {
         ai_config: config.ai.clone(),
         ai_pending: Arc::new(Mutex::new(None)),
         ai_generation: Cell::new(0),
+        screenshot_path: RefCell::new(None),
+        shot_pending: Arc::new(Mutex::new(None)),
         _hotkey_manager: manager,
     };
 
@@ -674,17 +770,25 @@ fn main() {
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {
-            if event.state == HotKeyState::Pressed {
-                let ptr = delegate_addr as *const AnyObject;
-                unsafe {
-                    let obj: &AnyObject = &*ptr;
-                    let _: () = msg_send![
-                        obj,
-                        performSelectorOnMainThread: sel!(toggleFromHotkey),
-                        withObject: std::ptr::null::<AnyObject>(),
-                        waitUntilDone: false,
-                    ];
-                }
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            let selector = if event.id == shot_id {
+                sel!(captureScreenshot)
+            } else if event.id == toggle_id {
+                sel!(toggleFromHotkey)
+            } else {
+                continue;
+            };
+            let ptr = delegate_addr as *const AnyObject;
+            unsafe {
+                let obj: &AnyObject = &*ptr;
+                let _: () = msg_send![
+                    obj,
+                    performSelectorOnMainThread: selector,
+                    withObject: std::ptr::null::<AnyObject>(),
+                    waitUntilDone: false,
+                ];
             }
         }
     });
