@@ -10,6 +10,7 @@ mod paths;
 mod providers;
 mod screenshot;
 mod secrets;
+mod window;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -50,7 +51,7 @@ use providers::{
     AiCommandsProvider, AiProvider, AppsProvider, BookmarksProvider, CalcProvider,
     ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider, EmojiProvider,
     FilesProvider, PluginProvider, QuicklinksProvider, SnippetsProvider, SystemProvider,
-    WebSearchProvider,
+    WebSearchProvider, WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -259,6 +260,10 @@ struct Ivars {
     frecency: Frecency,
     /// Row index currently armed for a two-step destructive confirmation.
     pending_confirm: Cell<isize>,
+    /// PID of the app that was frontmost just before the panel opened. Window
+    /// commands target this app's focused window (since opening the panel makes
+    /// litecast itself frontmost). -1 when unknown.
+    prev_app_pid: Cell<i32>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -510,6 +515,17 @@ impl AppDelegate {
     fn show(&self) {
         eprintln!("[litecast] show");
         let ivars = self.ivars();
+
+        // Remember which app was frontmost before we steal focus, so window
+        // commands can target its window rather than litecast's own panel.
+        let workspace = NSWorkspace::sharedWorkspace();
+        if let Some(front) = workspace.frontmostApplication() {
+            let pid = front.processIdentifier();
+            if pid > 0 && pid != std::process::id() as i32 {
+                ivars.prev_app_pid.set(pid);
+            }
+        }
+
         self.layout(ivars.results.borrow().len());
 
         // Normal launcher open with an empty field: surface session recents.
@@ -805,6 +821,14 @@ impl AppDelegate {
             self.resume_ai();
             return;
         }
+        // Window management: needs the main thread + Accessibility, handled here.
+        if let Action::Window(op) = action {
+            if let Some(id) = &id {
+                ivars.frecency.record(id);
+            }
+            self.run_window_op(op);
+            return;
+        }
         // Toggle a clipboard pin, then refresh the list in place (panel stays open).
         if let Action::TogglePin { key } = action {
             ivars.clip_history.toggle_pin(&key);
@@ -842,6 +866,47 @@ impl AppDelegate {
         if action.execute() {
             self.hide_and_reset();
         }
+    }
+
+    /// Run a window-management op against the previously-frontmost app's window.
+    /// Verifies Accessibility trust lazily (prompting only on first use); if not
+    /// trusted, shows a helpful row that opens the right System Settings pane
+    /// instead of failing silently.
+    fn run_window_op(&self, op: model::WindowOp) {
+        let ivars = self.ivars();
+        if !window::trusted(false) {
+            // Trigger the standard system prompt the first time.
+            window::trusted(true);
+            self.show_status_row(
+                "Accessibility permission needed",
+                "Grant litecast access in System Settings \u{203a} Privacy & Security \u{203a} Accessibility, then run the command again",
+                Action::Open(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                        .to_string(),
+                ),
+            );
+            return;
+        }
+        match window::apply(self.mtm(), ivars.prev_app_pid.get(), op) {
+            Ok(()) => self.hide_and_reset(),
+            Err(msg) => self.show_status_row("Window command failed", &msg, Action::None),
+        }
+    }
+
+    /// Replace the results list with a single informational row (keeps the panel
+    /// open). Used for window-management permission/error feedback.
+    fn show_status_row(&self, title: &str, subtitle: &str, action: Action) {
+        let ivars = self.ivars();
+        *ivars.results.borrow_mut() = vec![Item::new(
+            title.to_string(),
+            subtitle.to_string(),
+            "Window",
+            0,
+            action,
+        )];
+        ivars.table.reloadData();
+        self.layout(1);
+        self.select_row(0);
     }
 
     /// Start a fresh AI conversation with `prompt` (optionally about an image),
@@ -1334,6 +1399,8 @@ fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
         "Command" => "terminal",
         "Recent" => "clock.arrow.circlepath",
         "Plugin" => "puzzlepiece.extension",
+        "Window" => "macwindow",
+        "Proc" => "bolt.horizontal.circle",
         "?" => "wand.and.stars",
         _ => "magnifyingglass",
     };
@@ -1359,6 +1426,8 @@ fn source_tag(source: &str) -> Option<&'static str> {
         "History" => Some("History"),
         "Plugin" => Some("Plugin"),
         "Recent" => Some("Recent"),
+        "Window" => Some("Window"),
+        "Proc" => Some("Process"),
         _ => None,
     }
 }
@@ -1647,6 +1716,11 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
         Filter::Cmd,
     );
     engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
+    // Window management is opt-in (needs Accessibility); only surface its
+    // commands when explicitly enabled in the config.
+    if config.window.enabled {
+        engine.add(Box::new(WindowProvider::new()), Filter::Cmd);
+    }
     engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
     engine.add(Box::new(AppsProvider::new()), Filter::Apps);
     engine.add(Box::new(FilesProvider::new()), Filter::Files);
@@ -1752,6 +1826,7 @@ fn main() {
         critter_idx: Cell::new(0),
         frecency: frecency.clone(),
         pending_confirm: Cell::new(-1),
+        prev_app_pid: Cell::new(-1),
         _hotkey_manager: manager,
     };
 

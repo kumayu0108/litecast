@@ -6,6 +6,9 @@ description = "A super-lightweight Spotlight/Raycast-style launcher for macOS"
 license = "MIT"
 
 [dependencies]
+accessibility-sys = "0.2.0"
+core-foundation = "0.10.1"
+core-graphics-types = "0.2.0"
 global-hotkey = "0.8.0"
 keyring = { version = "3", features = ["apple-native"] }
 nucleo-matcher = "0.3.1"

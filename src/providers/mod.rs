@@ -15,6 +15,7 @@ pub mod quicklinks;
 pub mod snippets;
 pub mod system;
 pub mod websearch;
+pub mod window;
 
 pub use ai::AiProvider;
 pub use ai_commands::AiCommandsProvider;
@@ -32,3 +33,4 @@ pub use quicklinks::QuicklinksProvider;
 pub use snippets::SnippetsProvider;
 pub use system::SystemProvider;
 pub use websearch::WebSearchProvider;
+pub use window::WindowProvider;

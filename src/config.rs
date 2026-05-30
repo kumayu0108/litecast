@@ -64,6 +64,15 @@ critters = true
 [clipboard]
 keep_images = true
 max_images = 20
+
+# Window management. This is the ONE litecast feature that needs the macOS
+# Accessibility permission, so it is OFF by default. Set enabled = true to show
+# window commands (type "win", or search e.g. "Maximize Window"). The first time
+# you run a window command, macOS asks you to grant litecast Accessibility access
+# in System Settings > Privacy & Security > Accessibility. Nothing here runs (or
+# prompts) until you actually trigger a window command.
+[window]
+enabled = false
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +86,7 @@ pub struct Config {
     pub ai: AiConfig,
     pub ui: UiConfig,
     pub clipboard: ClipboardConfig,
+    pub window: WindowConfig,
 }
 
 impl Default for Config {
@@ -90,8 +100,17 @@ impl Default for Config {
             ai: AiConfig::default(),
             ui: UiConfig::default(),
             clipboard: ClipboardConfig::default(),
+            window: WindowConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WindowConfig {
+    /// Window management uses the Accessibility permission, so it is opt-in and
+    /// OFF by default. When false, the window commands are not registered at all.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

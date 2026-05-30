@@ -1,3 +1,21 @@
+/// A window-management operation against the frontmost app's focused window.
+/// Pure data; the actual Accessibility calls live in `crate::window` and run on
+/// the main thread when the item is activated.
+#[derive(Clone, Copy, Debug)]
+pub enum WindowOp {
+    LeftHalf,
+    RightHalf,
+    TopHalf,
+    BottomHalf,
+    LeftThird,
+    RightThird,
+    CenterTwoThirds,
+    Maximize,
+    Center,
+    NextDisplay,
+    PrevDisplay,
+}
+
 /// What happens when the user activates (presses Enter on) a result.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -19,6 +37,9 @@ pub enum Action {
     /// Re-open the last AI interaction from the recents view, restoring its
     /// transcript and re-entering follow-up chat. Handled specially by the UI.
     ResumeAi,
+    /// Move/resize the frontmost app's focused window. Handled specially by the
+    /// UI (main thread + Accessibility), like AI actions.
+    Window(WindowOp),
     /// Toggle the pinned state of a clipboard entry (identified by its key:
     /// text or image path). Handled by the UI so it can refresh the list.
     TogglePin { key: String },
@@ -116,6 +137,8 @@ impl Action {
             Action::AskAi { .. } => false,
             Action::AskAiFollowup { .. } => false,
             Action::ResumeAi => false,
+            // Handled by the UI (main thread + Accessibility); never run here.
+            Action::Window(_) => false,
             // Handled by the UI; never executed directly.
             Action::TogglePin { .. } => false,
             // Handled by the UI's two-step confirm flow; never executed directly.
