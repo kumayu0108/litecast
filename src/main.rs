@@ -1,6 +1,7 @@
 mod ai;
 mod clipboard;
 mod config;
+mod critters;
 mod engine;
 mod model;
 mod paths;
@@ -17,14 +18,13 @@ use global_hotkey::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSAnimationContext, NSColor, NSControl, NSFont, NSPanel, NSPasteboard, NSPasteboardTypeString,
-    NSScreen,
-    NSScrollView, NSSearchField, NSTableColumn, NSTableView, NSTextField,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSAnimationContext, NSColor, NSControl, NSFont, NSImage, NSImageView, NSPanel, NSPasteboard,
+    NSPasteboardTypeString, NSScreen, NSScrollView, NSSearchField, NSTableColumn, NSTableView,
+    NSTextField, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -111,6 +111,12 @@ struct Ivars {
     playful_placeholders: bool,
     /// Rotating index into the playful placeholder list.
     placeholder_idx: Cell<usize>,
+    /// Image view used for the wandering critter (bottom edge of the panel).
+    critter_view: Retained<NSImageView>,
+    /// Loaded critter GIF images (empty = feature dormant).
+    critter_images: Vec<Retained<NSImage>>,
+    /// Rotating index into the critter image list.
+    critter_idx: Cell<usize>,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -197,6 +203,21 @@ define_class!(
             self.ivars().search.setStringValue(&NSString::from_str(""));
             self.show();
             self.dispatch_query();
+        }
+
+        // Occasionally send a critter strolling across the bottom edge while the
+        // panel is open. No-op when hidden, disabled, or no GIFs are installed.
+        #[unsafe(method(walkCritter:))]
+        fn walk_critter(&self, _timer: &AnyObject) {
+            self.start_critter_walk();
+        }
+
+        // One-shot: park the critter off-screen and stop its animation.
+        #[unsafe(method(hideCritter:))]
+        fn hide_critter(&self, _timer: &AnyObject) {
+            let ivars = self.ivars();
+            ivars.critter_view.setHidden(true);
+            ivars.critter_view.setAnimates(false);
         }
 
         // Repeating timer: record clipboard changes into history. Only does work
@@ -504,6 +525,50 @@ impl AppDelegate {
         self.layout(n);
     }
 
+    /// Send a critter walking from the left edge to the right edge.
+    fn start_critter_walk(&self) {
+        let ivars = self.ivars();
+        if !ivars.visible.get() || ivars.critter_images.is_empty() {
+            return;
+        }
+        let idx = ivars.critter_idx.get();
+        ivars.critter_idx.set(idx.wrapping_add(1));
+        let image = &ivars.critter_images[idx % ivars.critter_images.len()];
+
+        const SIZE: f64 = 28.0;
+        let view = &ivars.critter_view;
+        view.setImage(Some(image));
+        view.setAnimates(true);
+        view.setHidden(false);
+        // Start just off the left edge, sitting on the bottom.
+        view.setFrame(NSRect::new(
+            NSPoint::new(-SIZE, 2.0),
+            NSSize::new(SIZE, SIZE),
+        ));
+
+        let duration = 6.0;
+        unsafe {
+            NSAnimationContext::beginGrouping();
+            let ctx = NSAnimationContext::currentContext();
+            ctx.setDuration(duration);
+            let animator: Retained<AnyObject> = msg_send![&**view, animator];
+            let _: () = msg_send![&animator, setFrameOrigin: NSPoint::new(PANEL_WIDTH + SIZE, 2.0)];
+            NSAnimationContext::endGrouping();
+        }
+
+        // Park it off-screen and stop animating shortly after it exits.
+        let delegate_obj: &AnyObject = self;
+        let _hide_timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                duration + 0.2,
+                delegate_obj,
+                sel!(hideCritter:),
+                None,
+                false,
+            )
+        };
+    }
+
     /// Resize the panel to fit `rows` results and reposition the subviews.
     fn layout(&self, rows: usize) {
         let ivars = self.ivars();
@@ -603,14 +668,15 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSTextField> {
     field
 }
 
-fn build_panel(
-    mtm: MainThreadMarker,
-) -> (
-    Retained<LcPanel>,
-    Retained<NSSearchField>,
-    Retained<NSTableView>,
-    Retained<NSScrollView>,
-) {
+struct PanelViews {
+    panel: Retained<LcPanel>,
+    search: Retained<NSSearchField>,
+    table: Retained<NSTableView>,
+    scroll: Retained<NSScrollView>,
+    critter: Retained<NSImageView>,
+}
+
+fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     let content_rect = NSRect::new(
         NSPoint::new(0.0, 0.0),
         NSSize::new(PANEL_WIDTH, SEARCH_AREA_H),
@@ -682,11 +748,26 @@ fn build_panel(
     scroll.setHasVerticalScroller(true);
     scroll.setDrawsBackground(false);
 
+    // Critter image view, kept on top and hidden until it walks.
+    let critter = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(NSPoint::new(-28.0, 2.0), NSSize::new(28.0, 28.0)),
+    );
+    critter.setHidden(true);
+    critter.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+
     effect.addSubview(&search);
     effect.addSubview(&scroll);
+    effect.addSubview(&critter);
     panel.setContentView(Some(&effect));
 
-    (panel, search, table, scroll)
+    PanelViews {
+        panel,
+        search,
+        table,
+        scroll,
+        critter,
+    }
 }
 
 fn build_engine(history: History, config: &Config) -> Engine {
@@ -708,7 +789,30 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    let (panel, search, table, scroll) = build_panel(mtm);
+    let views = build_panel(mtm);
+    let PanelViews {
+        panel,
+        search,
+        table,
+        scroll,
+        critter,
+    } = views;
+
+    // Load critter GIFs (if any) only when the feature is enabled.
+    let config = config::load();
+    let critter_images: Vec<Retained<NSImage>> = if config.ui.critters {
+        critters::discover()
+            .into_iter()
+            .filter_map(|path| {
+                NSImage::initWithContentsOfFile(
+                    NSImage::alloc(),
+                    &NSString::from_str(&path.to_string_lossy()),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
     let toggle_hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
@@ -722,7 +826,6 @@ fn main() {
     let toggle_id = toggle_hotkey.id();
     let shot_id = shot_hotkey.id();
 
-    let config = config::load();
     let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50);
@@ -746,6 +849,9 @@ fn main() {
         shot_pending: Arc::new(Mutex::new(None)),
         playful_placeholders: config.ui.playful_placeholders,
         placeholder_idx: Cell::new(0),
+        critter_view: critter,
+        critter_images,
+        critter_idx: Cell::new(0),
         _hotkey_manager: manager,
     };
 
@@ -837,6 +943,18 @@ fn main() {
             1.0,
             target,
             sel!(pollClipboard:),
+            None,
+            true,
+        )
+    };
+
+    // Wandering-critter timer: fires occasionally; a no-op unless the panel is
+    // open and critter GIFs are installed.
+    let _critter_timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            23.0,
+            target,
+            sel!(walkCritter:),
             None,
             true,
         )
