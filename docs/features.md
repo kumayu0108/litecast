@@ -114,6 +114,37 @@ entry back to the clipboard.
 
 ## AI
 
-`? <question>` asks the configured backend (only on `Enter`). `setkey <api-key>`
-stores the key in the Keychain. `Option+Shift+Space` captures a screen region to
-ask about it.
+`? <question>` asks the configured backend (only on `Enter`). `Option+Shift+Space`
+captures a screen region to ask about it (vision).
+
+### Providers
+
+Set in the `[ai]` config section via `provider`:
+
+| `provider` | Backend | Notes |
+| --- | --- | --- |
+| `anthropic` | Anthropic Claude | Messages API |
+| `openai` | OpenAI | chat-completions |
+| `gemini` | Google Gemini | `generateContent`; `google` is an alias |
+| `openai-compatible` | any OpenAI-compatible endpoint | set `endpoint`; `cursor` is a legacy alias |
+
+Gemini example (default model, no endpoint needed):
+
+```toml
+[ai]
+provider = "gemini"
+model = "gemini-2.5-flash"
+endpoint = ""
+```
+
+Get a Gemini key at Google AI Studio (https://aistudio.google.com). Gemini sends
+the key in the `x-goog-api-key` header (never the URL). Gemini can also be used
+through its OpenAI-compatible endpoint with `provider = "openai-compatible"` and
+the matching `endpoint`. A non-empty `endpoint` overrides the default base URL
+for `gemini` and `openai-compatible` (useful for proxies).
+
+### Keys
+
+`setkey <api-key>` stores the key in the macOS Keychain (service `litecast`)
+under the **active** provider's name. Keys are never written to config files. To
+switch providers, change `provider`, then run `setkey` with that provider's key.

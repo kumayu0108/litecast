@@ -30,7 +30,7 @@ so it stays fast and lean.
 - Web-search fallback (opens the default browser).
 - Clipboard history (the `clip` keyword).
 - User-defined custom commands + an external [plugin protocol](docs/plugins.md).
-- AI query (Claude / OpenAI / Cursor-compatible), with API keys stored in the macOS Keychain.
+- AI query (Anthropic Claude / OpenAI / Google Gemini / any OpenAI-compatible endpoint), with API keys stored in the macOS Keychain.
 - Screenshot capture sent to an AI vision model.
 - Small, opt-out UI delights (playful placeholders, fade-in, easter eggs, wandering critters).
 
@@ -57,6 +57,34 @@ Open the panel and start typing:
 - Anything else offers a web search.
 
 Frequently and recently activated results are automatically boosted toward the top.
+
+### AI providers
+
+Pick a backend in the `[ai]` section of the config. Supported `provider` values:
+
+- `anthropic` - Anthropic Claude (Messages API).
+- `openai` - OpenAI chat-completions.
+- `gemini` - Google Gemini (Generative Language API). `google` is an alias.
+- `openai-compatible` - any OpenAI-compatible endpoint via the `endpoint`
+  override. `cursor` still works as a legacy alias for this.
+
+Example Gemini config:
+
+```toml
+[ai]
+provider = "gemini"
+model = "gemini-2.5-flash"
+endpoint = ""   # leave empty; only set this to point at a proxy
+```
+
+Get a Gemini key from Google AI Studio (https://aistudio.google.com). Gemini can
+alternatively be reached through its OpenAI-compatible endpoint using
+`provider = "openai-compatible"` with the appropriate `endpoint`.
+
+Keys are never stored in config files: run `setkey <api-key>` in the panel to
+save the key in the macOS Keychain under the **active** provider (service
+`litecast`). Switch providers by changing `provider`, then `setkey` that
+provider's key. Then ask with `? your question`.
 
 ### Filters
 

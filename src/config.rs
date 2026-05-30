@@ -46,10 +46,12 @@ web_search_url = "https://www.google.com/search?q={}"
 currency_ttl_hours = 12
 
 [ai]
-# Backend: "anthropic", "openai", or "cursor" (OpenAI-compatible endpoint).
+# Backend: "anthropic", "openai", "gemini", or "openai-compatible"
+# ("cursor" still works as a legacy alias for "openai-compatible").
+# For Gemini, use e.g. model = "gemini-2.5-flash" (no endpoint needed).
 provider = "anthropic"
 model = "claude-3-5-sonnet-latest"
-# Optional override for OpenAI-compatible endpoints (used by "cursor"/custom).
+# Optional base-URL override for "openai-compatible"/"gemini" proxies.
 endpoint = ""
 
 [ui]
