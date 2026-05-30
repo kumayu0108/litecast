@@ -1,4 +1,5 @@
 mod clipboard;
+mod config;
 mod engine;
 mod model;
 mod paths;
@@ -27,9 +28,13 @@ use objc2_foundation::{
 };
 
 use clipboard::History;
+use config::Config;
 use engine::Engine;
 use model::Item;
-use providers::{AppsProvider, CalcProvider, ClipboardProvider, FilesProvider, WebSearchProvider};
+use providers::{
+    AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider,
+    WebSearchProvider,
+};
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 
@@ -442,13 +447,14 @@ fn build_panel(
     (panel, search, table, scroll)
 }
 
-fn build_engine(history: History) -> Engine {
+fn build_engine(history: History, config: &Config) -> Engine {
     let mut engine = Engine::new();
     engine.add(Box::new(CalcProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
+    engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
     engine.add(Box::new(AppsProvider::new()));
     engine.add(Box::new(FilesProvider::new()));
-    engine.add(Box::new(WebSearchProvider::google()));
+    engine.add(Box::new(WebSearchProvider::new(config.web_search_url.clone())));
     engine
 }
 
@@ -463,6 +469,7 @@ fn main() {
     let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
     manager.register(hotkey).expect("failed to register hotkey");
 
+    let config = config::load();
     let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50);
@@ -508,7 +515,7 @@ fn main() {
     // sources like mdfind never block typing) and signals the main thread when
     // results are ready. Blocks on recv when idle, so it uses zero CPU.
     {
-        let engine = Arc::new(build_engine(history.clone()));
+        let engine = Arc::new(build_engine(history.clone(), &config));
         let pending = pending.clone();
         std::thread::spawn(move || {
             while let Ok((mut generation, mut query)) = query_rx.recv() {

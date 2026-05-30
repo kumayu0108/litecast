@@ -14,10 +14,6 @@ impl WebSearchProvider {
             template: template.into(),
         }
     }
-
-    pub fn google() -> Self {
-        Self::new("https://www.google.com/search?q={}")
-    }
 }
 
 impl Provider for WebSearchProvider {
