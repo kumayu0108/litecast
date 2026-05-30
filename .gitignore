@@ -4,3 +4,11 @@
 *.dSYM
 .DS_Store
 .env
+
+# Internal planning / design / research docs (not user-facing). User docs like
+# README.md, docs/features.md, and docs/plugins.md are tracked normally.
+docs/*-plan.md
+docs/*-plans.md
+docs/*-research.md
+docs/*-design.md
+docs/internal/
