@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 /// What happens when the user activates (presses Enter on) a result.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -67,9 +65,4 @@ impl Action {
             Action::None => false,
         }
     }
-}
-
-/// Open a file URL or path helper.
-pub fn open_path(path: &PathBuf) {
-    let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
 }

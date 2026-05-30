@@ -4,6 +4,7 @@ mod model;
 mod providers;
 
 use std::cell::{Cell, RefCell};
+use std::sync::{mpsc, Arc, Mutex};
 
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -26,7 +27,9 @@ use objc2_foundation::{
 
 use engine::Engine;
 use model::Item;
-use providers::AppsProvider;
+use providers::{AppsProvider, CalcProvider, FilesProvider, WebSearchProvider};
+
+type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 
 const PANEL_WIDTH: f64 = 680.0;
 const SEARCH_AREA_H: f64 = 64.0;
@@ -61,8 +64,13 @@ struct Ivars {
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
     visible: Cell<bool>,
-    engine: Engine,
     results: RefCell<Vec<Item>>,
+    /// Monotonic query id; results tagged with a stale id are discarded.
+    generation: Cell<u64>,
+    /// Sends (generation, query) to the background worker.
+    query_tx: mpsc::Sender<(u64, String)>,
+    /// Latest computed results awaiting application on the main thread.
+    pending: PendingResults,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -94,11 +102,16 @@ define_class!(
             self.toggle();
         }
 
-        // NSSearchField text changed: re-run the query.
+        // NSSearchField text changed: dispatch the query to the worker thread.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, _notification: &NSNotification) {
-            let query = self.ivars().search.stringValue().to_string();
-            self.run_query(&query);
+            self.dispatch_query();
+        }
+
+        // Invoked on the main thread by the worker when results are ready.
+        #[unsafe(method(applyResults))]
+        fn apply_results(&self) {
+            self.apply_pending_results();
         }
 
         // Intercept navigation keys while editing the search field.
@@ -178,21 +191,43 @@ impl AppDelegate {
         }
         ivars.panel.orderOut(None);
         ivars.visible.set(false);
+        // Bump the generation so any in-flight worker results are discarded.
+        ivars.generation.set(ivars.generation.get().wrapping_add(1));
         // Clear state for the next invocation.
         ivars.search.setStringValue(&NSString::from_str(""));
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
     }
 
-    fn run_query(&self, query: &str) {
+    fn dispatch_query(&self) {
         let ivars = self.ivars();
-        let results = ivars.engine.query(query);
-        let n = results.len();
-        *ivars.results.borrow_mut() = results;
-        ivars.table.reloadData();
-        self.layout(n);
-        if n > 0 {
-            self.select_row(0);
+        let query = ivars.search.stringValue().to_string();
+        let generation = ivars.generation.get().wrapping_add(1);
+        ivars.generation.set(generation);
+
+        if query.trim().is_empty() {
+            ivars.results.borrow_mut().clear();
+            ivars.table.reloadData();
+            self.layout(0);
+            return;
+        }
+        let _ = ivars.query_tx.send((generation, query));
+    }
+
+    fn apply_pending_results(&self) {
+        let ivars = self.ivars();
+        let taken = ivars.pending.lock().ok().and_then(|mut slot| slot.take());
+        if let Some((generation, items)) = taken {
+            if generation != ivars.generation.get() {
+                return; // Stale results for an older query.
+            }
+            let n = items.len();
+            *ivars.results.borrow_mut() = items;
+            ivars.table.reloadData();
+            self.layout(n);
+            if n > 0 {
+                self.select_row(0);
+            }
         }
     }
 
@@ -387,7 +422,10 @@ fn build_panel(
 
 fn build_engine() -> Engine {
     let mut engine = Engine::new();
+    engine.add(Box::new(CalcProvider));
     engine.add(Box::new(AppsProvider::new()));
+    engine.add(Box::new(FilesProvider::new()));
+    engine.add(Box::new(WebSearchProvider::google()));
     engine
 }
 
@@ -402,14 +440,19 @@ fn main() {
     let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
     manager.register(hotkey).expect("failed to register hotkey");
 
+    let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
+    let pending: PendingResults = Arc::new(Mutex::new(None));
+
     let ivars = Ivars {
         panel,
         search,
         table,
         scroll,
         visible: Cell::new(false),
-        engine: build_engine(),
         results: RefCell::new(Vec::new()),
+        generation: Cell::new(0),
+        query_tx,
+        pending: pending.clone(),
         _hotkey_manager: manager,
     };
 
@@ -433,8 +476,40 @@ fn main() {
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
-    // Hotkey listener: blocks when idle (zero CPU) and bounces onto the main thread.
     let delegate_addr = Retained::as_ptr(&delegate) as usize;
+
+    // Background query worker: runs providers off the main thread (so slow
+    // sources like mdfind never block typing) and signals the main thread when
+    // results are ready. Blocks on recv when idle, so it uses zero CPU.
+    {
+        let engine = Arc::new(build_engine());
+        let pending = pending.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut generation, mut query)) = query_rx.recv() {
+                // Coalesce: skip to the most recent queued query.
+                while let Ok((g, q)) = query_rx.try_recv() {
+                    generation = g;
+                    query = q;
+                }
+                let items = engine.query(&query);
+                if let Ok(mut slot) = pending.lock() {
+                    *slot = Some((generation, items));
+                }
+                let ptr = delegate_addr as *const AnyObject;
+                unsafe {
+                    let obj: &AnyObject = &*ptr;
+                    let _: () = msg_send![
+                        obj,
+                        performSelectorOnMainThread: sel!(applyResults),
+                        withObject: std::ptr::null::<AnyObject>(),
+                        waitUntilDone: false,
+                    ];
+                }
+            }
+        });
+    }
+
+    // Hotkey listener: blocks when idle (zero CPU) and bounces onto the main thread.
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {

@@ -1,10 +1,8 @@
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
-
 use crate::model::Item;
 
-/// A source of results for a query. Providers are queried on each keystroke.
-pub trait Provider: Send {
+/// A source of results for a query. Providers are queried on each keystroke,
+/// on a background worker thread, so they must be `Send + Sync`.
+pub trait Provider: Send + Sync {
     /// Short label for the provider.
     fn name(&self) -> &'static str;
     /// Append results for `query` into `out`.
@@ -45,23 +43,14 @@ impl Engine {
     }
 }
 
-/// Shared fuzzy-matching helper built on nucleo-matcher.
-pub struct Fuzzy {
-    matcher: Matcher,
-}
-
-impl Fuzzy {
-    pub fn new() -> Self {
-        Self {
-            matcher: Matcher::new(Config::DEFAULT),
-        }
-    }
-
-    /// Score `candidate` against `needle`. Returns None if it does not match.
-    pub fn score(&mut self, needle: &str, candidate: &str) -> Option<u32> {
-        let pattern = Pattern::parse(needle, CaseMatching::Ignore, Normalization::Smart);
-        let mut buf = Vec::new();
-        let haystack = Utf32Str::new(candidate, &mut buf);
-        pattern.score(haystack, &mut self.matcher)
-    }
+/// Convenience fuzzy scorer used by providers. Builds a matcher per call, which
+/// is cheap relative to process/IO work and keeps providers `Sync`.
+pub fn fuzzy_score(needle: &str, candidate: &str) -> Option<u32> {
+    use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+    use nucleo_matcher::{Config, Matcher, Utf32Str};
+    let pattern = Pattern::parse(needle, CaseMatching::Ignore, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let haystack = Utf32Str::new(candidate, &mut buf);
+    pattern.score(haystack, &mut matcher)
 }
