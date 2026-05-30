@@ -33,7 +33,13 @@ impl Provider for QuicklinksProvider {
                     continue;
                 }
             }
-            if let Some(score) = fuzzy_score(q, &link.name) {
+            let mut best = fuzzy_score(q, &link.name);
+            for alias in link.alias_list() {
+                if let Some(s) = fuzzy_score(q, alias) {
+                    best = Some(best.map_or(s, |b| b.max(s)));
+                }
+            }
+            if let Some(score) = best {
                 out.push(build_item(link, "", 200 + score as i64));
             }
         }

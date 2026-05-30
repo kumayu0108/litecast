@@ -29,8 +29,15 @@ impl Provider for CommandsProvider {
                     continue;
                 }
             }
-            // Otherwise fuzzy-match the command name.
-            if let Some(score) = fuzzy_score(q, &cmd.name) {
+            // Otherwise fuzzy-match the command name or any of its aliases,
+            // keeping the best score.
+            let mut best = fuzzy_score(q, &cmd.name);
+            for alias in cmd.alias_list() {
+                if let Some(s) = fuzzy_score(q, alias) {
+                    best = Some(best.map_or(s, |b| b.max(s)));
+                }
+            }
+            if let Some(score) = best {
                 out.push(build_item(cmd, "", 200 + score as i64));
             }
         }

@@ -87,6 +87,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub clipboard: ClipboardConfig,
     pub window: WindowConfig,
+    pub hotkeys: Vec<HotkeyConfig>,
 }
 
 impl Default for Config {
@@ -101,8 +102,23 @@ impl Default for Config {
             ui: UiConfig::default(),
             clipboard: ClipboardConfig::default(),
             window: WindowConfig::default(),
+            hotkeys: Vec::new(),
         }
     }
+}
+
+/// A user-defined global hotkey: a key combo (modifiers + key) bound to an
+/// action. Registered alongside the built-in toggle/screenshot hotkeys;
+/// registration failures are logged and non-fatal.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HotkeyConfig {
+    /// Combo like "Cmd+Shift+S" (modifiers: Cmd/Ctrl/Alt/Shift + a key).
+    pub key: String,
+    /// "open" (file/url/app), "shell" (run a shell command), or "command"
+    /// (run a named `[[commands]]` entry).
+    pub kind: String,
+    /// The URL/path (open), shell command (shell), or command name (command).
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -137,8 +153,23 @@ pub struct QuicklinkConfig {
     /// Optional keyword that triggers the link with a `{query}` argument.
     #[serde(default)]
     pub keyword: String,
+    /// Optional single alias folded into name matching (`alias = "gh"`).
+    #[serde(default)]
+    pub alias: String,
+    /// Optional extra aliases folded into name matching.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// URL template; `{query}` is replaced with the (URL-encoded) argument.
     pub url: String,
+}
+
+impl QuicklinkConfig {
+    /// All alias strings (singular `alias` plus the `aliases` list), skipping empties.
+    pub fn alias_list(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.alias.as_str())
+            .chain(self.aliases.iter().map(String::as_str))
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,9 +216,24 @@ pub struct CommandConfig {
     pub subtitle: String,
     #[serde(default)]
     pub keyword: String,
+    /// Optional single alias folded into name matching (`alias = "ss"`).
+    #[serde(default)]
+    pub alias: String,
+    /// Optional extra aliases folded into name matching.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// "open" (file/url/app) or "shell".
     pub kind: String,
     pub target: String,
+}
+
+impl CommandConfig {
+    /// All alias strings (singular `alias` plus the `aliases` list), skipping empties.
+    pub fn alias_list(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.alias.as_str())
+            .chain(self.aliases.iter().map(String::as_str))
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
