@@ -32,7 +32,7 @@ use config::Config;
 use engine::Engine;
 use model::Item;
 use providers::{
-    AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider,
+    AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, FilesProvider, PluginProvider,
     WebSearchProvider,
 };
 
@@ -452,6 +452,7 @@ fn build_engine(history: History, config: &Config) -> Engine {
     engine.add(Box::new(CalcProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
+    engine.add(Box::new(PluginProvider::new()));
     engine.add(Box::new(AppsProvider::new()));
     engine.add(Box::new(FilesProvider::new()));
     engine.add(Box::new(WebSearchProvider::new(config.web_search_url.clone())));

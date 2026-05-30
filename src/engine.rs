@@ -3,7 +3,8 @@ use crate::model::Item;
 /// A source of results for a query. Providers are queried on each keystroke,
 /// on a background worker thread, so they must be `Send + Sync`.
 pub trait Provider: Send + Sync {
-    /// Short label for the provider.
+    /// Short label for the provider (used for diagnostics).
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     /// Append results for `query` into `out`.
     fn query(&self, query: &str, out: &mut Vec<Item>);
