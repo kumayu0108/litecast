@@ -21,8 +21,24 @@ pub enum WindowOp {
 pub enum Action {
     /// Open a file, folder, application bundle, or URL via `/usr/bin/open`.
     Open(String),
-    /// Run a shell command via `sh -c`.
+    /// Run a program directly with an argv array, WITHOUT a shell. This is the
+    /// injection-safe way to run a command that includes user-derived text:
+    /// arguments are passed verbatim to `execve`, so there is no shell word
+    /// splitting, globbing, quoting, or metacharacter interpretation. Prefer
+    /// this over `RunShell` for anything built from user input.
+    Run { program: String, args: Vec<String> },
+    /// Run a shell command via `sh -c`. Reserved for commands that genuinely
+    /// need shell features (pipes, conditionals) AND contain no untrusted input,
+    /// or for explicitly user-authored shell config (custom `kind = "shell"`
+    /// commands/hotkeys/plugins). Never build this from runtime user text.
     RunShell(String),
+    /// Append a timestamped line to a notes file (pure Rust, no shell), and
+    /// optionally mirror it into Apple Notes via AppleScript passed as argv.
+    AppendNote {
+        path: String,
+        text: String,
+        apple_notes: bool,
+    },
     /// Copy text to the clipboard.
     CopyText(String),
     /// Expand placeholders in a snippet template, then copy it to the clipboard
@@ -125,11 +141,32 @@ impl Action {
                     .spawn();
                 true
             }
+            Action::Run { program, args } => {
+                let _ = std::process::Command::new(program).args(args).spawn();
+                true
+            }
             Action::RunShell(cmd) => {
                 let _ = std::process::Command::new("/bin/sh")
                     .arg("-c")
                     .arg(cmd)
                     .spawn();
+                true
+            }
+            Action::AppendNote {
+                path,
+                text,
+                apple_notes,
+            } => {
+                append_note_line(path, text);
+                if *apple_notes {
+                    // Pass the note title/body as argv parameters so no user
+                    // text is interpolated into the AppleScript source.
+                    let title = text.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+                    let script = "on run argv\ntell application \"Notes\" to make new note with properties {name:(item 1 of argv), body:(item 2 of argv)}\nend run";
+                    let _ = std::process::Command::new("/usr/bin/osascript")
+                        .args(["-e", script, "--", &title, text])
+                        .spawn();
+                }
                 true
             }
             Action::CopyText(text) => {
@@ -186,4 +223,47 @@ fn shell_capture(cmd: &str) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
         .unwrap_or_default()
+}
+
+/// Append a `[YYYY-MM-DD HH:MM] <text>` line to a notes file, creating it if
+/// needed. Done in pure Rust (no shell) so the note body can never be
+/// interpreted as a command.
+fn append_note_line(path: &str, text: &str) {
+    use std::io::Write;
+    let stamp = std::process::Command::new("/bin/date")
+        .arg("+%Y-%m-%d %H:%M")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+        .unwrap_or_default();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "[{stamp}] {text}");
+    }
+}
+
+/// Build a shell-free `Action::Run` that invokes `osascript` with a literal
+/// `script`. Use this for AppleScript that contains NO user-derived text.
+pub fn osascript_action(script: impl Into<String>) -> Action {
+    Action::Run {
+        program: "/usr/bin/osascript".to_string(),
+        args: vec!["-e".to_string(), script.into()],
+    }
+}
+
+/// Build a shell-free `Action::Run` that invokes `osascript`, passing each
+/// entry of `user_args` as an `on run argv` parameter (referenced inside the
+/// script as `item 1 of argv`, `item 2 of argv`, ...). User text is delivered
+/// verbatim via argv, so it is never parsed as AppleScript source — the
+/// injection-safe way to script with user input.
+pub fn osascript_action_with_args(script: impl Into<String>, user_args: &[&str]) -> Action {
+    let mut args = vec!["-e".to_string(), script.into(), "--".to_string()];
+    args.extend(user_args.iter().map(|s| s.to_string()));
+    Action::Run {
+        program: "/usr/bin/osascript".to_string(),
+        args,
+    }
 }

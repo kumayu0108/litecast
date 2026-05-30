@@ -73,7 +73,11 @@ impl Provider for NotesProvider {
                         },
                         "Notes",
                         9_100,
-                        Action::RunShell(self.capture_command(body)),
+                        Action::AppendNote {
+                            path: self.path.to_string_lossy().to_string(),
+                            text: body.to_string(),
+                            apple_notes: self.apple_notes,
+                        },
                     ));
                 }
             }
@@ -81,34 +85,3 @@ impl Provider for NotesProvider {
     }
 }
 
-impl NotesProvider {
-    fn capture_command(&self, body: &str) -> String {
-        let path = self.path.to_string_lossy().to_string();
-        let mut cmd = format!(
-            "printf '[%s] %s\\n' \"$(date '+%Y-%m-%d %H:%M')\" {} >> {}",
-            shell_quote(body),
-            shell_quote(&path)
-        );
-        if self.apple_notes {
-            let script = format!(
-                "tell application \"Notes\" to make new note with properties {{name:{}, body:{}}}",
-                applescript_quote(&first_words(body, 6)),
-                applescript_quote(body)
-            );
-            cmd.push_str(&format!("; osascript -e {}", shell_quote(&script)));
-        }
-        cmd
-    }
-}
-
-fn first_words(s: &str, n: usize) -> String {
-    s.split_whitespace().take(n).collect::<Vec<_>>().join(" ")
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn applescript_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}

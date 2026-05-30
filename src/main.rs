@@ -860,7 +860,11 @@ impl AppDelegate {
     fn record_recent(&self, item: &Item) {
         let keep = matches!(
             item.action,
-            Action::Open(_) | Action::RunShell(_) | Action::CopyText(_) | Action::Paste(_)
+            Action::Open(_)
+                | Action::Run { .. }
+                | Action::RunShell(_)
+                | Action::CopyText(_)
+                | Action::Paste(_)
         );
         if !keep {
             return;

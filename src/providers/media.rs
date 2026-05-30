@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::engine::Provider;
-use crate::model::{Action, Item};
+use crate::model::{osascript_action, Action, Item};
 
 /// Media controls for the active player. Commands target Spotify or Music via
 /// AppleScript when one of them is running; if neither is running the action is
@@ -35,7 +35,7 @@ impl Provider for MediaProvider {
                 "Controls Spotify or Music if running",
                 "Media",
                 9_000,
-                Action::RunShell(player_command(spotify_cmd, music_cmd)),
+                osascript_action(player_script(spotify_cmd, music_cmd)),
             ));
             return;
         }
@@ -62,12 +62,12 @@ impl Provider for MediaProvider {
     }
 }
 
-/// Build a command that dispatches to whichever supported player is running.
-fn player_command(spotify_cmd: &str, music_cmd: &str) -> String {
+/// Build a single AppleScript (run without a shell) that dispatches to whichever
+/// supported player is running. The control verbs (`spotify_cmd`/`music_cmd`)
+/// are fixed strings chosen above, never user input.
+fn player_script(spotify_cmd: &str, music_cmd: &str) -> String {
     format!(
-        "if pgrep -x Spotify >/dev/null; then osascript -e {}; elif pgrep -x Music >/dev/null; then osascript -e {}; fi",
-        shell_quote(&format!("tell application \"Spotify\" to {spotify_cmd}")),
-        shell_quote(&format!("tell application \"Music\" to {music_cmd}")),
+        "if application \"Spotify\" is running then\ntell application \"Spotify\" to {spotify_cmd}\nelse if application \"Music\" is running then\ntell application \"Music\" to {music_cmd}\nend if"
     )
 }
 
@@ -100,8 +100,4 @@ return ""
     } else {
         Some(s)
     }
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }

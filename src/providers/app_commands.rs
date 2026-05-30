@@ -1,6 +1,6 @@
 use crate::config::AppCommandConfig;
 use crate::engine::Provider;
-use crate::model::{Action, Item};
+use crate::model::{osascript_action_with_args, Action, Item};
 use crate::providers::websearch::percent_encode;
 
 /// `@keyword`-triggered app commands (e.g. `@term ls`, `@finder ~/Downloads`).
@@ -57,13 +57,16 @@ impl AppCommandsProvider {
                     (
                         "Open Terminal".to_string(),
                         "Press Enter to open Terminal.app".to_string(),
-                        Action::RunShell("open -a Terminal".to_string()),
+                        Action::Run {
+                            program: "/usr/bin/open".to_string(),
+                            args: vec!["-a".to_string(), "Terminal".to_string()],
+                        },
                     )
                 } else {
                     (
                         format!("Run in Terminal: {arg}"),
                         "Opens Terminal.app and runs the command".to_string(),
-                        Action::RunShell(terminal_script(arg)),
+                        terminal_action(arg),
                     )
                 };
                 Item::new(title, subtitle, "Command", 9_000, action)
@@ -101,11 +104,12 @@ impl AppCommandsProvider {
                 let filled = fill_template(&cmd.template, arg);
                 let action = match other {
                     "open" => Action::Open(filled.clone()),
-                    "applescript" => Action::RunShell(format!(
-                        "osascript -e {}",
-                        shell_quote(&filled)
-                    )),
-                    // "shell" and anything unrecognized run via the shell.
+                    // Run the user-authored AppleScript template without a shell.
+                    "applescript" => osascript_action_with_args(&filled, &[]),
+                    // "shell" and anything unrecognized run the user-authored
+                    // template via the shell. This is an explicit power-user
+                    // opt-in (`kind = "shell"`); the template comes from the
+                    // user's own config.toml.
                     _ => Action::RunShell(filled.clone()),
                 };
                 let subtitle = if cmd.subtitle.is_empty() {
@@ -124,25 +128,12 @@ fn fill_template(template: &str, arg: &str) -> String {
     template.replace("{query}", arg).replace("{arg}", arg)
 }
 
-/// Build an osascript invocation that opens Terminal.app and runs `cmd`.
-fn terminal_script(cmd: &str) -> String {
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script {}\nend tell",
-        applescript_quote(cmd)
-    );
-    format!("osascript -e {}", shell_quote(&script))
-}
-
-/// Quote a string as a single-quoted shell argument (safe against embedded `'`).
-fn shell_quote(s: &str) -> String {
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{escaped}'")
-}
-
-/// Quote a string as an AppleScript string literal.
-fn applescript_quote(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+/// Build a shell-free action that opens Terminal.app and runs `cmd`. The user's
+/// command is passed as an `on run argv` parameter, so it is never interpreted
+/// as AppleScript source (no quote-breakout / injection).
+fn terminal_action(cmd: &str) -> Action {
+    let script = "on run argv\ntell application \"Terminal\"\nactivate\ndo script (item 1 of argv)\nend tell\nend run";
+    osascript_action_with_args(script, &[cmd])
 }
 
 fn expand_tilde(path: &str) -> String {

@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::engine::Provider;
-use crate::model::{Action, Item};
+use crate::model::{osascript_action_with_args, Action, Item};
 
 /// World clock, date math, and timers. Time zones go through the built-in `date`
 /// CLI with a `TZ` override (correct DST handling, no chrono). Date math is
@@ -194,21 +194,20 @@ fn try_timer(q: &str, out: &mut Vec<Item>) -> bool {
         format!("Notifies \"{label}\" when elapsed - Enter to start"),
         "Time",
         9_400,
-        Action::RunShell(timer_command(secs, &label)),
+        timer_action(secs, &label),
     ));
     true
 }
 
-/// A shell command that sleeps then posts a notification. Run via the standard
-/// `RunShell` action (which spawns and does not wait), so the UI never blocks.
-fn timer_command(secs: u64, label: &str) -> String {
-    let title = "litecast timer";
+/// A shell-free timer: a detached `osascript` that `delay`s then posts a
+/// notification. `secs` is a parsed u64 (safe to embed); the notification label
+/// is passed as an `on run argv` parameter, never interpolated into the script.
+/// osascript runs detached (spawned, not waited on), so the UI never blocks.
+fn timer_action(secs: u64, label: &str) -> Action {
     let script = format!(
-        "display notification {} with title {} sound name \"Glass\"",
-        applescript_quote(label),
-        applescript_quote(title)
+        "on run argv\ndelay {secs}\ndisplay notification (item 1 of argv) with title \"litecast timer\" sound name \"Glass\"\nend run"
     );
-    format!("sleep {secs}; osascript -e {}", shell_quote(&script))
+    osascript_action_with_args(&script, &[label])
 }
 
 fn parse_duration(token: &str) -> Option<u64> {
@@ -479,13 +478,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn applescript_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
 
 // Keep an explicit reference so a future async timer can use a thread handle;
 // currently the shell `sleep` approach is used (no blocking on the worker).

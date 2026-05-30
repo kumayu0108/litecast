@@ -1,6 +1,6 @@
 use crate::clipboard::{ClipEntry, ClipKind, History};
 use crate::engine::{fuzzy_score, Provider};
-use crate::model::{Action, Item};
+use crate::model::{osascript_action_with_args, Action, Item};
 
 /// Clipboard history, surfaced when the query starts with the `clip` keyword
 /// (e.g. "clip" to list recent items, or "clip foo" to filter). Pinned entries
@@ -104,7 +104,7 @@ fn make_item(entry: &ClipEntry, n: usize, score: i64) -> Item {
                 format!("#{n} - Image - Enter to copy"),
                 "Clip",
                 score,
-                Action::RunShell(copy_image_cmd(&path)),
+                copy_image_action(&path),
             );
             if path.is_empty() {
                 item
@@ -122,10 +122,12 @@ fn make_item(entry: &ClipEntry, n: usize, score: i64) -> Item {
     }
 }
 
-/// AppleScript to put a stored PNG back on the clipboard as image data.
-fn copy_image_cmd(path: &str) -> String {
-    let escaped = path.replace('"', "\\\"");
-    format!("osascript -e 'set the clipboard to (read (POSIX file \"{escaped}\") as «class PNGf»)'")
+/// Shell-free action that puts a stored PNG back on the clipboard as image
+/// data. The file path is passed as an `on run argv` parameter, so it is never
+/// interpreted as AppleScript source (even though it is an app-generated path).
+fn copy_image_action(path: &str) -> Action {
+    let script = "on run argv\nset the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)\nend run";
+    osascript_action_with_args(script, &[path])
 }
 
 /// Returns the text after the `clip` keyword if the query uses it.

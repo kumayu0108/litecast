@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use crate::engine::{fuzzy_score, Provider};
-use crate::model::{Action, Item};
+use crate::model::{osascript_action, Action, Item};
 
 /// macOS system commands (lock, sleep, dark mode, volume, Wi-Fi, Bluetooth,
 /// brightness, caffeinate, eject, Focus, etc.). Fuzzy-searchable by name;
@@ -9,9 +9,13 @@ use crate::model::{Action, Item};
 /// (`volume 50`, `brightness 70`) are matched by keyword. All routes are
 /// permission-free or use AppleScript (which prompts for Automation on first
 /// use); nothing here needs Accessibility.
+///
+/// Every command runs WITHOUT a shell (argv arrays / `osascript -e`); the only
+/// remaining `sh -c` is the Wi-Fi toggle, which reads-then-sets state and
+/// contains no user-derived text (the device name comes from the system).
 pub struct SystemProvider {
     entries: Vec<Entry>,
-    has_brightness_cli: bool,
+    brightness_cli: Option<String>,
 }
 
 struct Entry {
@@ -23,16 +27,13 @@ struct Entry {
 impl SystemProvider {
     pub fn new() -> Self {
         let mut entries = vec![
-            shell_entry(
-                "Lock Screen",
-                "Lock the screen now",
-                "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession -suspend",
-            ),
-            shell_entry("Sleep", "Put the Mac to sleep", "pmset sleepnow"),
-            shell_entry(
+            Entry::new("Lock Screen", "Lock the screen now", lock_action()),
+            run_entry("Sleep", "Put the Mac to sleep", "/usr/bin/pmset", &["sleepnow"]),
+            run_entry(
                 "Sleep Displays",
                 "Turn off the displays",
-                "pmset displaysleepnow",
+                "/usr/bin/pmset",
+                &["displaysleepnow"],
             ),
             osascript_entry(
                 "Toggle Dark Mode",
@@ -60,16 +61,18 @@ impl SystemProvider {
                 "Unmute the output volume",
                 "set volume without output muted",
             ),
-            // Caffeinate: spawn detached (RunShell does not wait), stop via pkill.
-            shell_entry(
+            // Caffeinate: spawned detached (Run does not wait), stopped via pkill.
+            run_entry(
                 "Caffeinate",
                 "Keep the Mac awake until you decaffeinate (or reboot)",
-                "caffeinate -dimsu",
+                "/usr/bin/caffeinate",
+                &["-dimsu"],
             ),
-            shell_entry(
+            run_entry(
                 "Decaffeinate",
                 "Allow the Mac to sleep again (stops caffeinate)",
-                "pkill -x caffeinate",
+                "/usr/bin/pkill",
+                &["-x", "caffeinate"],
             ),
             osascript_entry(
                 "Eject All Disks",
@@ -77,96 +80,119 @@ impl SystemProvider {
                 "tell application \"Finder\" to eject (every disk whose ejectable is true)",
             ),
             // Do Not Disturb / Focus: no stable scriptable API on modern macOS.
-            // Best-effort via a user-created Shortcut; degrades to a no-op error
-            // if the shortcut does not exist.
-            shell_entry(
+            // Best-effort via a user-created Shortcut; a no-op if it is absent.
+            run_entry(
                 "Toggle Do Not Disturb",
                 "Best-effort: runs a Shortcut named \"Toggle Do Not Disturb\" if present",
-                "shortcuts run \"Toggle Do Not Disturb\" 2>/dev/null || true",
+                "/usr/bin/shortcuts",
+                &["run", "Toggle Do Not Disturb"],
             ),
             confirm_entry(
                 "Empty Trash",
                 "empty the Trash",
                 "Permanently delete the Trash contents (asks for Automation on first use)",
-                Action::RunShell(
-                    "osascript -e 'tell application \"Finder\" to empty trash'".to_string(),
-                ),
+                osascript_action("tell application \"Finder\" to empty trash"),
             ),
             confirm_entry(
                 "Restart",
                 "restart the Mac",
                 "Restart the computer (asks for Automation on first use)",
-                Action::RunShell(
-                    "osascript -e 'tell application \"System Events\" to restart'".to_string(),
-                ),
+                osascript_action("tell application \"System Events\" to restart"),
             ),
             confirm_entry(
                 "Shut Down",
                 "shut down the Mac",
                 "Power off the computer (asks for Automation on first use)",
-                Action::RunShell(
-                    "osascript -e 'tell application \"System Events\" to shut down'".to_string(),
-                ),
+                osascript_action("tell application \"System Events\" to shut down"),
             ),
         ];
 
         if let Some(device) = wifi_device() {
+            // Toggle reads-then-sets, so it keeps a small `sh -c`; `device` is a
+            // system-provided BSD name (e.g. en0), never user input.
             entries.push(shell_entry(
                 "Toggle Wi-Fi",
                 "Turn Wi-Fi on or off",
                 &toggle_wifi_command(&device),
             ));
-            entries.push(shell_entry(
+            entries.push(run_entry(
                 "Wi-Fi On",
                 "Turn Wi-Fi on",
-                &format!("networksetup -setairportpower {device} on"),
+                "/usr/sbin/networksetup",
+                &["-setairportpower", &device, "on"],
             ));
-            entries.push(shell_entry(
+            entries.push(run_entry(
                 "Wi-Fi Off",
                 "Turn Wi-Fi off",
-                &format!("networksetup -setairportpower {device} off"),
+                "/usr/sbin/networksetup",
+                &["-setairportpower", &device, "off"],
             ));
         }
 
         // Bluetooth has no permission-free CLI; only offer it when the optional
-        // `blueutil` helper is on PATH.
-        if has_cli("blueutil") {
-            entries.push(shell_entry(
+        // `blueutil` helper is installed (resolved to an absolute path).
+        if let Some(blueutil) = cli_path("blueutil") {
+            entries.push(run_entry(
                 "Toggle Bluetooth",
                 "Turn Bluetooth on or off (via blueutil)",
-                "blueutil -p toggle",
+                &blueutil,
+                &["-p", "toggle"],
             ));
-            entries.push(shell_entry(
+            entries.push(run_entry(
                 "Bluetooth On",
                 "Turn Bluetooth on (via blueutil)",
-                "blueutil -p 1",
+                &blueutil,
+                &["-p", "1"],
             ));
-            entries.push(shell_entry(
+            entries.push(run_entry(
                 "Bluetooth Off",
                 "Turn Bluetooth off (via blueutil)",
-                "blueutil -p 0",
+                &blueutil,
+                &["-p", "0"],
             ));
         }
 
         // Brightness has no permission-free CLI either; offer it only when the
         // optional `brightness` helper is installed.
-        let has_brightness_cli = has_cli("brightness");
-        if has_brightness_cli {
-            entries.push(shell_entry(
+        let brightness_cli = cli_path("brightness");
+        if let Some(brightness) = &brightness_cli {
+            entries.push(run_entry(
                 "Brightness Up",
                 "Raise display brightness (via brightness)",
-                "brightness +0.1",
+                brightness,
+                &["+0.1"],
             ));
-            entries.push(shell_entry(
+            entries.push(run_entry(
                 "Brightness Down",
                 "Lower display brightness (via brightness)",
-                "brightness -0.1",
+                brightness,
+                &["-0.1"],
             ));
         }
 
         Self {
             entries,
-            has_brightness_cli,
+            brightness_cli,
+        }
+    }
+}
+
+/// Lock the screen without a shell. The classic CGSession helper path contains
+/// a space ("Menu Extras"), which a shell would split into two arguments; an
+/// argv array passes it as one. Falls back to sleeping the displays when the
+/// helper is absent (locks when "require password immediately" is set).
+fn lock_action() -> Action {
+    const CGSESSION: &str =
+        "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession";
+    if std::path::Path::new(CGSESSION).exists() {
+        Action::Run {
+            program: CGSESSION.to_string(),
+            args: vec!["-suspend".to_string()],
+        }
+    } else {
+        Action::Run {
+            program: "/usr/bin/pmset".to_string(),
+            args: vec!["displaysleepnow".to_string()],
         }
     }
 }
@@ -213,22 +239,22 @@ impl SystemProvider {
         for kw in ["set volume ", "volume "] {
             if let Some(rest) = lower.strip_prefix(kw) {
                 if let Ok(level) = rest.trim().parse::<u32>() {
+                    // `level` is a parsed u32, so it is safe to embed literally.
                     let level = level.min(100);
-                    let script =
-                        format!("set volume output volume {level}");
+                    let script = format!("set volume output volume {level}");
                     out.push(Item::new(
                         format!("Set volume to {level}%"),
                         "Press Enter to apply",
                         "System",
                         9_000,
-                        Action::RunShell(osascript(&script)),
+                        osascript_action(script),
                     ));
                     return true;
                 }
             }
         }
 
-        if self.has_brightness_cli {
+        if let Some(brightness) = &self.brightness_cli {
             if let Some(rest) = lower.strip_prefix("brightness ") {
                 if let Ok(level) = rest.trim().parse::<u32>() {
                     let level = level.min(100);
@@ -238,7 +264,10 @@ impl SystemProvider {
                         "Press Enter to apply (via brightness)",
                         "System",
                         9_000,
-                        Action::RunShell(format!("brightness {frac}")),
+                        Action::Run {
+                            program: brightness.clone(),
+                            args: vec![format!("{frac}")],
+                        },
                     ));
                     return true;
                 }
@@ -248,35 +277,45 @@ impl SystemProvider {
     }
 }
 
-fn osascript(script: &str) -> String {
-    format!("osascript -e '{}'", script.replace('\'', "'\\''"))
+impl Entry {
+    fn new(name: &str, subtitle: &str, action: Action) -> Self {
+        Self {
+            name: name.to_string(),
+            subtitle: subtitle.to_string(),
+            action,
+        }
+    }
+}
+
+/// A shell-free entry that runs `program` with a fixed argv array.
+fn run_entry(name: &str, subtitle: &str, program: &str, args: &[&str]) -> Entry {
+    Entry::new(
+        name,
+        subtitle,
+        Action::Run {
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        },
+    )
 }
 
 fn shell_entry(name: &str, subtitle: &str, command: &str) -> Entry {
-    Entry {
-        name: name.to_string(),
-        subtitle: subtitle.to_string(),
-        action: Action::RunShell(command.to_string()),
-    }
+    Entry::new(name, subtitle, Action::RunShell(command.to_string()))
 }
 
 fn osascript_entry(name: &str, subtitle: &str, script: &str) -> Entry {
-    Entry {
-        name: name.to_string(),
-        subtitle: subtitle.to_string(),
-        action: Action::RunShell(osascript(script)),
-    }
+    Entry::new(name, subtitle, osascript_action(script))
 }
 
 fn confirm_entry(name: &str, label: &str, subtitle: &str, inner: Action) -> Entry {
-    Entry {
-        name: name.to_string(),
-        subtitle: subtitle.to_string(),
-        action: Action::Confirm {
+    Entry::new(
+        name,
+        subtitle,
+        Action::Confirm {
             label: label.to_string(),
             inner: Box::new(inner),
         },
-    }
+    )
 }
 
 /// Detect the Wi-Fi hardware port's BSD device name (usually `en0`).
@@ -310,10 +349,17 @@ fn toggle_wifi_command(device: &str) -> String {
     )
 }
 
-fn has_cli(name: &str) -> bool {
-    Command::new("/usr/bin/env")
-        .args(["which", name])
-        .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+/// Resolve an optional helper CLI to its absolute path via `which`, so we can
+/// invoke it without a shell (and without depending on the GUI process PATH).
+fn cli_path(name: &str) -> Option<String> {
+    let output = Command::new("/usr/bin/env").args(["which", name]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
 }

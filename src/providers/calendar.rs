@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::engine::Provider;
-use crate::model::{Action, Item};
+use crate::model::{osascript_action_with_args, Action, Item};
 
 /// Calendar & Reminders via AppleScript bridges (no entitlement-heavy linking).
 ///   `today` / `agenda`            - list today's calendar events
@@ -146,15 +146,14 @@ fn push_reminder(out: &mut Vec<Item>, text: &str) {
         return;
     }
     let (name, time) = split_at_time(text);
+    // The reminder name is passed as an `on run argv` parameter (item 1 of
+    // argv), never interpolated into the AppleScript source. Numeric h/m are
+    // parsed u32s, so embedding them literally is safe.
     let script = match time {
         Some((h, m)) => format!(
-            "tell application \"Reminders\"\nset d to (current date)\nset hours of d to {h}\nset minutes of d to {m}\nset seconds of d to 0\nmake new reminder with properties {{name:{}, remind me date:d}}\nend tell",
-            applescript_quote(&name)
+            "on run argv\ntell application \"Reminders\"\nset d to (current date)\nset hours of d to {h}\nset minutes of d to {m}\nset seconds of d to 0\nmake new reminder with properties {{name:(item 1 of argv), remind me date:d}}\nend tell\nend run"
         ),
-        None => format!(
-            "tell application \"Reminders\"\nmake new reminder with properties {{name:{}}}\nend tell",
-            applescript_quote(&name)
-        ),
+        None => "on run argv\ntell application \"Reminders\"\nmake new reminder with properties {name:(item 1 of argv)}\nend tell\nend run".to_string(),
     };
     let subtitle = match time {
         Some((h, m)) => format!("Reminder at {h:02}:{m:02} - Enter to add (asks for Automation)"),
@@ -165,7 +164,7 @@ fn push_reminder(out: &mut Vec<Item>, text: &str) {
         subtitle,
         "Reminders",
         9_100,
-        Action::RunShell(osascript(&script)),
+        osascript_action_with_args(&script, &[&name]),
     ));
 }
 
@@ -175,16 +174,16 @@ fn push_event(out: &mut Vec<Item>, text: &str) {
     }
     let (summary, time) = split_at_time(text);
     let (h, m) = time.unwrap_or((9, 0));
+    // Summary passed via argv; h/m are parsed u32s.
     let script = format!(
-        "tell application \"Calendar\"\nset startDate to (current date)\nset hours of startDate to {h}\nset minutes of startDate to {m}\nset seconds of startDate to 0\nset endDate to startDate + (60 * 60)\ntell calendar 1\nmake new event with properties {{summary:{}, start date:startDate, end date:endDate}}\nend tell\nend tell",
-        applescript_quote(&summary)
+        "on run argv\ntell application \"Calendar\"\nset startDate to (current date)\nset hours of startDate to {h}\nset minutes of startDate to {m}\nset seconds of startDate to 0\nset endDate to startDate + (60 * 60)\ntell calendar 1\nmake new event with properties {{summary:(item 1 of argv), start date:startDate, end date:endDate}}\nend tell\nend tell\nend run"
     );
     out.push(Item::new(
         format!("Add event: {summary}"),
         format!("Today {h:02}:{m:02} (1h) - Enter to add (asks for Automation)"),
         "Calendar",
         9_100,
-        Action::RunShell(osascript(&script)),
+        osascript_action_with_args(&script, &[&summary]),
     ));
 }
 
@@ -239,16 +238,4 @@ fn parse_time(s: &str) -> Option<(u32, u32)> {
         return None;
     }
     Some((h, m))
-}
-
-fn osascript(script: &str) -> String {
-    format!("osascript -e {}", shell_quote(script))
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn applescript_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
