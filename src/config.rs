@@ -4,7 +4,7 @@ use crate::paths::support_file;
 
 const CONFIG_FILE: &str = "config.toml";
 
-const DEFAULT_CONFIG_TOML: &str = r#"# litecast configuration
+const DEFAULT_CONFIG_TOML: &str = r##"# litecast configuration
 
 # Search engine used by the "Search the web" fallback. Use {} for the query.
 web_search_url = "https://www.google.com/search?q={}"
@@ -154,7 +154,60 @@ max_images = 20
 # prompts) until you actually trigger a window command.
 [window]
 enabled = false
-"#;
+
+# Menu-bar search. Lists the frontmost app's menu-bar items (via Accessibility)
+# under the "menu" keyword and triggers the chosen one. Like window management
+# this needs the Accessibility permission, so it is OFF by default. Nothing runs
+# or prompts until you enable it and type "menu".
+[menu]
+enabled = false
+
+# Script commands. Drop executable scripts into the scripts directory (default
+# scripts/ under the support dir) and they appear as runnable commands. Add an
+# optional metadata header read from leading comment lines (both hash and
+# slash-slash comment styles work):
+#   # @litecast.title: Say hello
+#   # @litecast.description: Prints a greeting
+#   # @litecast.keyword: hello
+#   # @litecast.mode: clipboard        # silent | clipboard | notify
+# "mode" controls what happens with the script's stdout on Enter: silent does
+# nothing, clipboard copies it, notify shows a notification. The file is run
+# directly (argv, no shell), so make it executable (chmod +x) with a shebang.
+[scripts]
+# dir = "scripts"                       # relative -> support dir; or absolute
+
+# Git helper. Type "git" or "repo" (optionally with a filter) to list recent
+# repositories scanned from scan_dirs, then open them in your editor/terminal,
+# reveal in Finder, or run status/pull/fetch (output shown via notification).
+[git]
+# scan_dirs = ["~/Developer", "~/work"] # default: ~/Developer ~/Projects ~/Code ~/src
+max_depth = 2
+
+# Quick file/folder creation. "new file <name>", "new folder <name>", or a
+# template name ("new note.md"). Relative names are created under base_dir.
+[newfile]
+# base_dir = "~/Desktop"                # default: ~/Desktop (else home)
+#
+# [[newfile.templates]]
+# name = "note.md"
+# contents = "# Note\n\n"
+
+# Pomodoro / focus timer. "pomodoro" starts a session with the durations below;
+# "focus 50" overrides the work length. Transitions fire notifications; the
+# countdown runs detached so nothing blocks. "pomodoro" while one is running
+# shows the time remaining.
+[pomodoro]
+work_minutes = 25
+break_minutes = 5
+long_break_minutes = 15
+cycles = 4
+
+# Screen color picker. "pick color" (or "color pick") samples a pixel from
+# anywhere on screen and shows HEX / RGB / HSL; Enter copies the HEX. Recently
+# picked colors are remembered (up to max_recent) and listed under "colors".
+[color]
+max_recent = 12
+"##;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -173,6 +226,12 @@ pub struct Config {
     pub hotkey: ToggleHotkeyConfig,
     pub notes: NotesConfig,
     pub datetime: DateTimeConfig,
+    pub scripts: ScriptsConfig,
+    pub git: GitConfig,
+    pub newfile: NewFileConfig,
+    pub pomodoro: PomodoroConfig,
+    pub color: ColorConfig,
+    pub menu: MenuConfig,
 }
 
 impl Default for Config {
@@ -192,8 +251,171 @@ impl Default for Config {
             hotkey: ToggleHotkeyConfig::default(),
             notes: NotesConfig::default(),
             datetime: DateTimeConfig::default(),
+            scripts: ScriptsConfig::default(),
+            git: GitConfig::default(),
+            newfile: NewFileConfig::default(),
+            pomodoro: PomodoroConfig::default(),
+            color: ColorConfig::default(),
+            menu: MenuConfig::default(),
         }
     }
+}
+
+/// Script commands. Executable scripts in `dir` are surfaced as runnable
+/// commands; metadata comment headers (`# @litecast.title:` etc.) customize how
+/// they appear and run.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScriptsConfig {
+    /// Scripts directory. Empty resolves to `scripts/` under the support dir;
+    /// a relative path is resolved under the support dir; absolute used as-is.
+    pub dir: String,
+}
+
+/// Git helper. Scans `scan_dirs` (lazily, on the `git`/`repo` keyword) for git
+/// repositories up to `max_depth` levels deep, plus any repos you have opened.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    /// Directories to scan for repositories. Empty resolves to `~/Developer`,
+    /// `~/Projects`, `~/Code`, and `~/src` (only those that exist).
+    pub scan_dirs: Vec<String>,
+    /// How many directory levels deep to look for a `.git` folder.
+    pub max_depth: usize,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            scan_dirs: Vec::new(),
+            max_depth: 2,
+        }
+    }
+}
+
+impl GitConfig {
+    /// Resolved scan dirs: configured ones (tilde-expanded), or the common
+    /// defaults that exist on disk.
+    pub fn resolved_dirs(&self) -> Vec<std::path::PathBuf> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if !self.scan_dirs.is_empty() {
+            return self
+                .scan_dirs
+                .iter()
+                .map(|d| {
+                    if let (Some(rest), Some(home)) = (d.strip_prefix("~/"), home.as_ref()) {
+                        home.join(rest)
+                    } else {
+                        std::path::PathBuf::from(d)
+                    }
+                })
+                .collect();
+        }
+        let Some(home) = home else {
+            return Vec::new();
+        };
+        ["Developer", "Projects", "Code", "src"]
+            .iter()
+            .map(|d| home.join(d))
+            .filter(|p| p.is_dir())
+            .collect()
+    }
+}
+
+/// Quick file/folder creation. New items are created relative to `base_dir`
+/// (default `~/Desktop`); `templates` define named starter files.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NewFileConfig {
+    /// Base directory for relative `new file`/`new folder` paths. Empty = Desktop.
+    pub base_dir: String,
+    pub templates: Vec<TemplateConfig>,
+}
+
+impl Default for NewFileConfig {
+    fn default() -> Self {
+        Self {
+            base_dir: String::new(),
+            templates: Vec::new(),
+        }
+    }
+}
+
+impl NewFileConfig {
+    /// Resolved base directory: the configured dir (tilde-expanded), else
+    /// `~/Desktop`, else the home dir.
+    pub fn resolved_base(&self) -> std::path::PathBuf {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if !self.base_dir.is_empty() {
+            if let (Some(rest), Some(home)) = (self.base_dir.strip_prefix("~/"), home.as_ref()) {
+                return home.join(rest);
+            }
+            return std::path::PathBuf::from(&self.base_dir);
+        }
+        match home {
+            Some(h) => {
+                let desktop = h.join("Desktop");
+                if desktop.is_dir() {
+                    desktop
+                } else {
+                    h
+                }
+            }
+            None => std::path::PathBuf::from("."),
+        }
+    }
+}
+
+/// A named starter-file template. `name` is the filename (with extension)
+/// offered after `new`; `contents` is the initial text written into it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TemplateConfig {
+    pub name: String,
+    #[serde(default)]
+    pub contents: String,
+}
+
+/// Pomodoro / focus timer durations (minutes).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PomodoroConfig {
+    pub work_minutes: u64,
+    pub break_minutes: u64,
+    pub long_break_minutes: u64,
+    /// Work sessions before a long break.
+    pub cycles: u64,
+}
+
+impl Default for PomodoroConfig {
+    fn default() -> Self {
+        Self {
+            work_minutes: 25,
+            break_minutes: 5,
+            long_break_minutes: 15,
+            cycles: 4,
+        }
+    }
+}
+
+/// Screen color picker. `max_recent` caps the persisted recent-colors palette.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ColorConfig {
+    pub max_recent: usize,
+}
+
+impl Default for ColorConfig {
+    fn default() -> Self {
+        Self { max_recent: 12 }
+    }
+}
+
+/// Menu-bar search. Like window management it uses the Accessibility
+/// permission, so it is opt-in and OFF by default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct MenuConfig {
+    pub enabled: bool,
 }
 
 /// Quick-note capture settings. Notes are appended to a plain-text file (the

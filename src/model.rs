@@ -16,6 +16,18 @@ pub enum WindowOp {
     PrevDisplay,
 }
 
+/// How a captured-output command (script command, git action, port kill, …)
+/// surfaces its stdout after running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Run and ignore output.
+    Silent,
+    /// Copy stdout to the clipboard.
+    Clipboard,
+    /// Post a notification with the first lines of stdout.
+    Notify,
+}
+
 /// What happens when the user activates (presses Enter on) a result.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -56,6 +68,30 @@ pub enum Action {
     /// Accept an `@shortcut` autocomplete suggestion: complete the `@token` in
     /// the search field. Handled specially by the UI (keeps the panel open).
     Autocomplete { token: String },
+    /// Run a program with an argv array (no shell), capture its stdout, and per
+    /// `mode` ignore it, copy it to the clipboard, or post a notification. Runs
+    /// on a detached thread so the UI never blocks. Injection-safe (argv only).
+    RunCapture {
+        program: String,
+        args: Vec<String>,
+        mode: CaptureMode,
+        /// Title used for the notification (and clipboard feedback label).
+        title: String,
+    },
+    /// Create a file or folder at `path` (pure Rust, no shell), then optionally
+    /// reveal it in Finder and/or open it in `$EDITOR`/VS Code.
+    CreatePath {
+        path: String,
+        directory: bool,
+        reveal: bool,
+        editor: bool,
+    },
+    /// Pick a pixel color from anywhere on screen. Handled specially by the UI
+    /// (main thread; uses `screencapture` then reads the pixel).
+    PickColor,
+    /// Press a menu-bar item (by its menu path) in the app with `pid`. Handled
+    /// specially by the UI (main thread + Accessibility), like window ops.
+    MenuPick { pid: i32, path: Vec<String> },
     /// Move/resize the frontmost app's focused window. Handled specially by the
     /// UI (main thread + Accessibility), like AI actions.
     Window(WindowOp),
@@ -173,6 +209,24 @@ impl Action {
                 crate::clipboard::set_clipboard(text);
                 true
             }
+            Action::RunCapture {
+                program,
+                args,
+                mode,
+                title,
+            } => {
+                run_capture(program.clone(), args.clone(), *mode, title.clone());
+                true
+            }
+            Action::CreatePath {
+                path,
+                directory,
+                reveal,
+                editor,
+            } => {
+                create_path(path, *directory, *reveal, *editor);
+                true
+            }
             Action::Paste(template) => {
                 crate::clipboard::set_clipboard(&expand_placeholders(template));
                 true
@@ -187,6 +241,10 @@ impl Action {
             Action::AskAiFollowup { .. } => false,
             Action::ResumeAi => false,
             Action::Autocomplete { .. } => false,
+            // Handled by the UI (main thread; screencapture + pixel read).
+            Action::PickColor => false,
+            // Handled by the UI (main thread + Accessibility); never run here.
+            Action::MenuPick { .. } => false,
             // Handled by the UI (main thread + Accessibility); never run here.
             Action::Window(_) => false,
             // Handled by the UI; never executed directly.
@@ -198,31 +256,143 @@ impl Action {
     }
 }
 
-/// Expand snippet placeholders at activation time: `{date}`, `{time}`,
-/// `{clipboard}`, and `{cursor}` (removed). Subprocesses run only when the
-/// matching placeholder is present, and only on Enter (never per keystroke).
-fn expand_placeholders(template: &str) -> String {
-    let mut text = template.to_string();
+/// Expand snippet placeholders at activation time: `{date}`, `{date:FORMAT}`,
+/// `{time}`, `{clipboard}`, and `{cursor}` (removed). Subprocesses run only when
+/// the matching placeholder is present, and only on Enter (never per keystroke).
+/// Everything runs WITHOUT a shell: `date`/`pbpaste` are invoked with argv
+/// arrays, so a `FORMAT` is passed verbatim and never interpreted by a shell.
+pub fn expand_placeholders(template: &str) -> String {
+    let mut text = expand_date_format(template);
     if text.contains("{date}") {
-        text = text.replace("{date}", &shell_capture("date +%Y-%m-%d"));
+        text = text.replace("{date}", &date_format("%Y-%m-%d"));
     }
     if text.contains("{time}") {
-        text = text.replace("{time}", &shell_capture("date +%H:%M"));
+        text = text.replace("{time}", &date_format("%H:%M"));
     }
     if text.contains("{clipboard}") {
-        text = text.replace("{clipboard}", &shell_capture("pbpaste"));
+        text = text.replace("{clipboard}", &pbpaste());
     }
     text.replace("{cursor}", "")
 }
 
-fn shell_capture(cmd: &str) -> String {
-    std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+/// Replace every `{date:FORMAT}` occurrence with `date +FORMAT` output. FORMAT
+/// is whatever sits between `{date:` and the next `}`.
+fn expand_date_format(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{date:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "{date:".len()..];
+        if let Some(end) = after.find('}') {
+            let fmt = &after[..end];
+            out.push_str(&date_format(fmt));
+            rest = &after[end + 1..];
+        } else {
+            // No closing brace: emit the rest verbatim and stop.
+            out.push_str(&rest[start..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Run `/bin/date +<fmt>` (argv, no shell) and return its trimmed stdout.
+fn date_format(fmt: &str) -> String {
+    std::process::Command::new("/bin/date")
+        .arg(format!("+{fmt}"))
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
         .unwrap_or_default()
+}
+
+fn pbpaste() -> String {
+    std::process::Command::new("/usr/bin/pbpaste")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+/// Post a macOS notification (title + body) via `osascript`, passing both as
+/// `on run argv` parameters so neither is interpreted as AppleScript source.
+pub fn notify(title: &str, body: &str) {
+    let script = "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run";
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", script, "--", title, body])
+        .spawn();
+}
+
+/// Run a program (argv, no shell) on a detached thread, capturing stdout, then
+/// surface it per `mode`. Falls back to stderr when stdout is empty so failures
+/// are visible.
+fn run_capture(program: String, args: Vec<String>, mode: CaptureMode, title: String) {
+    std::thread::spawn(move || {
+        let output = std::process::Command::new(&program).args(&args).output();
+        let text = match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                if stdout.trim().is_empty() {
+                    String::from_utf8_lossy(&o.stderr).to_string()
+                } else {
+                    stdout
+                }
+            }
+            Err(e) => format!("failed to run {program}: {e}"),
+        };
+        match mode {
+            CaptureMode::Silent => {}
+            CaptureMode::Clipboard => crate::clipboard::set_clipboard(text.trim_end()),
+            CaptureMode::Notify => {
+                let body: String = text.lines().take(6).collect::<Vec<_>>().join("\n");
+                let body = if body.trim().is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    body
+                };
+                notify(&title, &body);
+            }
+        }
+    });
+}
+
+/// Create a file or folder, then optionally reveal it in Finder / open it in an
+/// editor. Pure Rust for the filesystem work (no shell), so the path is never
+/// interpreted as a command.
+fn create_path(path: &str, directory: bool, reveal: bool, editor: bool) {
+    use std::path::Path;
+    let p = Path::new(path);
+    if directory {
+        let _ = std::fs::create_dir_all(p);
+    } else {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if !p.exists() {
+            let _ = std::fs::write(p, "");
+        }
+    }
+    if editor {
+        let editor_cmd = std::env::var("EDITOR").ok().filter(|s| !s.is_empty());
+        match editor_cmd {
+            Some(ed) => {
+                let _ = std::process::Command::new(ed).arg(path).spawn();
+            }
+            None => {
+                // Default to VS Code if present, else just open the item.
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .args(["-a", "Visual Studio Code", path])
+                    .spawn();
+            }
+        }
+    } else if reveal {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .args(["-R", path])
+            .spawn();
+    } else {
+        let _ = std::process::Command::new("/usr/bin/open").arg(path).spawn();
+    }
 }
 
 /// Append a `[YYYY-MM-DD HH:MM] <text>` line to a notes file, creating it if
