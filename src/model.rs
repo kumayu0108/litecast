@@ -26,6 +26,8 @@ pub struct Item {
     pub score: i64,
     /// Human-readable source label (e.g. "App", "File", "Calc").
     pub source: &'static str,
+    /// Optional path used to render a system icon to the left of the row.
+    pub icon_path: Option<String>,
 }
 
 impl Item {
@@ -42,7 +44,14 @@ impl Item {
             action,
             score,
             source,
+            icon_path: None,
         }
+    }
+
+    /// Attach a filesystem path whose system icon should be shown for this row.
+    pub fn with_icon(mut self, path: impl Into<String>) -> Self {
+        self.icon_path = Some(path.into());
+        self
     }
 }
 

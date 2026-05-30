@@ -35,13 +35,17 @@ impl Provider for AppsProvider {
             if let Some(score) = pattern.score(haystack, &mut matcher) {
                 // Apps are high-value launch targets; bias their score up.
                 let ranked = score as i64 + 100;
-                out.push(Item::new(
-                    app.name.clone(),
-                    app.path.display().to_string(),
-                    "App",
-                    ranked,
-                    Action::Open(app.path.display().to_string()),
-                ));
+                let path = app.path.display().to_string();
+                out.push(
+                    Item::new(
+                        app.name.clone(),
+                        path.clone(),
+                        "App",
+                        ranked,
+                        Action::Open(path.clone()),
+                    )
+                    .with_icon(path),
+                );
             }
         }
     }

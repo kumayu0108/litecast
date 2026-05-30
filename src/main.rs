@@ -21,10 +21,11 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSAnimationContext, NSColor, NSControl, NSFont, NSImage, NSImageView, NSPanel, NSPasteboard,
-    NSPasteboardTypeString, NSScreen, NSScrollView, NSSearchField, NSTableColumn, NSTableView,
-    NSTextField, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSAnimationContext, NSBox, NSBoxType, NSColor, NSControl, NSEvent, NSEventModifierFlags,
+    NSFocusRingType, NSFont, NSImage, NSImageView, NSPanel, NSPasteboard, NSPasteboardTypeString,
+    NSScreen, NSScrollView, NSTableColumn, NSTableView, NSTextField, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSIndexSet, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -43,8 +44,8 @@ use providers::{
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
-const PANEL_WIDTH: f64 = 680.0;
-const SEARCH_AREA_H: f64 = 64.0;
+const PANEL_WIDTH: f64 = 720.0;
+const SEARCH_AREA_H: f64 = 66.0;
 const PLACEHOLDER_NORMAL: &str = "Search litecast...";
 const PLACEHOLDER_SHOT: &str = "Ask about the screenshot, then press Enter...";
 const PLAYFUL_PLACEHOLDERS: &[&str] = &[
@@ -55,10 +56,14 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "I was just resting, honest.",
     "Your wish is my command... command.",
 ];
-const ROW_H: f64 = 44.0;
+const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
+const ROW_ICON: f64 = 26.0;
+const CORNER_RADIUS: f64 = 18.0;
 // Fraction of the screen height where the panel's top edge sits.
 const TOP_FRACTION: f64 = 0.80;
+// Built-in critters used when the user has supplied no GIFs.
+const DEFAULT_CRITTERS: &[&str] = &["🐢", "🐈", "🐌", "🦆", "🐧", "🐞"];
 
 // NSPanel subclass allowed to become the key window despite being borderless.
 define_class!(
@@ -77,14 +82,51 @@ define_class!(
         fn can_become_main_window(&self) -> bool {
             true
         }
+
+        // A borderless accessory panel has no Edit menu, so the standard editing
+        // key equivalents never reach the field editor. Route them manually
+        // through the responder chain (to: nil targets the first responder).
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let flags = event.modifierFlags();
+            let only_cmd = flags
+                .intersection(NSEventModifierFlags::DeviceIndependentFlagsMask)
+                == NSEventModifierFlags::Command;
+            if only_cmd {
+                let chars = event
+                    .charactersIgnoringModifiers()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                let selector = match chars.as_str() {
+                    "a" => Some(sel!(selectAll:)),
+                    "c" => Some(sel!(copy:)),
+                    "v" => Some(sel!(paste:)),
+                    "x" => Some(sel!(cut:)),
+                    "z" => Some(sel!(undo:)),
+                    _ => None,
+                };
+                if let Some(selector) = selector {
+                    let app = NSApplication::sharedApplication(self.mtm());
+                    let to: *const AnyObject = std::ptr::null();
+                    let handled: bool =
+                        unsafe { msg_send![&app, sendAction: selector, to: to, from: self] };
+                    if handled {
+                        return true.into();
+                    }
+                }
+            }
+            let passed: bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
+            passed.into()
+        }
     }
 );
 
 struct Ivars {
     panel: Retained<LcPanel>,
-    search: Retained<NSSearchField>,
+    search: Retained<NSTextField>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
+    separator: Retained<NSBox>,
     visible: Cell<bool>,
     results: RefCell<Vec<Item>>,
     /// Monotonic query id; results tagged with a stale id are discarded.
@@ -111,9 +153,11 @@ struct Ivars {
     playful_placeholders: bool,
     /// Rotating index into the playful placeholder list.
     placeholder_idx: Cell<usize>,
-    /// Image view used for the wandering critter (bottom edge of the panel).
+    /// Image view used for the wandering critter when GIFs are installed.
     critter_view: Retained<NSImageView>,
-    /// Loaded critter GIF images (empty = feature dormant).
+    /// Text-glyph critter used out of the box when no GIFs are installed.
+    critter_label: Retained<NSTextField>,
+    /// Loaded critter GIF images (empty = use the built-in glyph critter).
     critter_images: Vec<Retained<NSImage>>,
     /// Rotating index into the critter image list.
     critter_idx: Cell<usize>,
@@ -146,6 +190,16 @@ define_class!(
         #[unsafe(method(toggleFromHotkey))]
         fn toggle_from_hotkey(&self) {
             self.toggle();
+        }
+
+        // One-shot safety net: guarantee the panel is fully opaque after the
+        // fade-in window, even if the fade animation was a no-op.
+        #[unsafe(method(ensurePanelVisible))]
+        fn ensure_panel_visible(&self) {
+            let ivars = self.ivars();
+            if ivars.visible.get() {
+                ivars.panel.setAlphaValue(1.0);
+            }
         }
 
         // NSSearchField text changed: dispatch the query to the worker thread.
@@ -218,6 +272,7 @@ define_class!(
             let ivars = self.ivars();
             ivars.critter_view.setHidden(true);
             ivars.critter_view.setAnimates(false);
+            ivars.critter_label.setHidden(true);
         }
 
         // Repeating timer: record clipboard changes into history. Only does work
@@ -274,7 +329,7 @@ define_class!(
             _table: &NSTableView,
             _column: Option<&NSTableColumn>,
             row: isize,
-        ) -> Option<Retained<NSTextField>> {
+        ) -> Option<Retained<NSView>> {
             let results = self.ivars().results.borrow();
             match results.get(row as usize) {
                 Some(item) => Some(make_row_cell(self.mtm(), item)),
@@ -286,7 +341,9 @@ define_class!(
 
 impl AppDelegate {
     fn toggle(&self) {
-        if self.ivars().visible.get() {
+        let visible = self.ivars().visible.get();
+        eprintln!("[litecast] toggle (currently visible={visible})");
+        if visible {
             self.hide_and_reset();
         } else {
             self.show();
@@ -294,6 +351,7 @@ impl AppDelegate {
     }
 
     fn show(&self) {
+        eprintln!("[litecast] show");
         let ivars = self.ivars();
         self.layout(ivars.results.borrow().len());
 
@@ -311,11 +369,15 @@ impl AppDelegate {
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
 
-        // Subtle fade-in.
-        ivars.panel.setAlphaValue(0.0);
         ivars.panel.makeKeyAndOrderFront(None);
         ivars.panel.makeFirstResponder(Some(&ivars.search));
         ivars.visible.set(true);
+
+        // Subtle fade-in: start transparent and animate up to fully opaque. The
+        // animator's final value is 1.0, so in normal operation the panel ends
+        // visible. A one-shot timer below re-asserts full opacity after the
+        // animation window so the panel can never be left stranded transparent.
+        ivars.panel.setAlphaValue(0.0);
         unsafe {
             NSAnimationContext::beginGrouping();
             let ctx = NSAnimationContext::currentContext();
@@ -324,6 +386,28 @@ impl AppDelegate {
             let _: () = msg_send![&animator, setAlphaValue: 1.0_f64];
             NSAnimationContext::endGrouping();
         }
+        let target: &AnyObject = self;
+        let _alpha_guard = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.2,
+                target,
+                sel!(ensurePanelVisible),
+                None,
+                false,
+            )
+        };
+
+        // Send a critter strolling shortly after the panel appears, so the
+        // little creature is visible without waiting for the periodic timer.
+        let _critter_kick = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.9,
+                target,
+                sel!(walkCritter:),
+                None,
+                false,
+            )
+        };
     }
 
     fn hide_and_reset(&self) {
@@ -525,33 +609,43 @@ impl AppDelegate {
         self.layout(n);
     }
 
-    /// Send a critter walking from the left edge to the right edge.
+    /// Send a critter walking from the left edge to the right edge. Uses an
+    /// installed GIF when present, otherwise a built-in text-glyph creature so
+    /// something always strolls across the panel out of the box.
     fn start_critter_walk(&self) {
         let ivars = self.ivars();
-        if !ivars.visible.get() || ivars.critter_images.is_empty() {
+        if !ivars.visible.get() {
             return;
         }
         let idx = ivars.critter_idx.get();
         ivars.critter_idx.set(idx.wrapping_add(1));
-        let image = &ivars.critter_images[idx % ivars.critter_images.len()];
 
-        const SIZE: f64 = 28.0;
-        let view = &ivars.critter_view;
-        view.setImage(Some(image));
-        view.setAnimates(true);
-        view.setHidden(false);
-        // Start just off the left edge, sitting on the bottom.
-        view.setFrame(NSRect::new(
-            NSPoint::new(-SIZE, 2.0),
-            NSSize::new(SIZE, SIZE),
-        ));
+        const SIZE: f64 = 30.0;
+        let start = NSRect::new(NSPoint::new(-SIZE, 2.0), NSSize::new(SIZE, SIZE));
+        let view: *const AnyObject = if ivars.critter_images.is_empty() {
+            let glyph = DEFAULT_CRITTERS[idx % DEFAULT_CRITTERS.len()];
+            let label = &ivars.critter_label;
+            label.setStringValue(&NSString::from_str(glyph));
+            label.setFrame(start);
+            label.setHidden(false);
+            &*ivars.critter_label as *const NSTextField as *const AnyObject
+        } else {
+            let image = &ivars.critter_images[idx % ivars.critter_images.len()];
+            let view = &ivars.critter_view;
+            view.setImage(Some(image));
+            view.setAnimates(true);
+            view.setHidden(false);
+            view.setFrame(start);
+            &*ivars.critter_view as *const NSImageView as *const AnyObject
+        };
 
         let duration = 6.0;
         unsafe {
+            let obj: &AnyObject = &*view;
             NSAnimationContext::beginGrouping();
             let ctx = NSAnimationContext::currentContext();
             ctx.setDuration(duration);
-            let animator: Retained<AnyObject> = msg_send![&**view, animator];
+            let animator: Retained<AnyObject> = msg_send![obj, animator];
             let _: () = msg_send![&animator, setFrameOrigin: NSPoint::new(PANEL_WIDTH + SIZE, 2.0)];
             NSAnimationContext::endGrouping();
         }
@@ -594,12 +688,21 @@ impl AppDelegate {
         );
         ivars.panel.setFrame_display(frame, true);
 
-        // Search field pinned to the top of the content view.
+        // Search field vertically centered in the top search area.
+        const SEARCH_H: f64 = 40.0;
         let search_frame = NSRect::new(
-            NSPoint::new(14.0, total_h - SEARCH_AREA_H + 14.0),
-            NSSize::new(PANEL_WIDTH - 28.0, 36.0),
+            NSPoint::new(22.0, results_h + (SEARCH_AREA_H - SEARCH_H) / 2.0),
+            NSSize::new(PANEL_WIDTH - 44.0, SEARCH_H),
         );
         ivars.search.setFrame(search_frame);
+
+        // Hairline separator between the search field and the results.
+        let separator_frame = NSRect::new(
+            NSPoint::new(18.0, results_h),
+            NSSize::new(PANEL_WIDTH - 36.0, 1.0),
+        );
+        ivars.separator.setFrame(separator_frame);
+        ivars.separator.setHidden(visible_rows == 0);
 
         // Results scroll view fills the area below the search field.
         let scroll_frame = NSRect::new(
@@ -651,29 +754,107 @@ fn answer_to_items(answer: &str) -> Vec<Item> {
         .collect()
 }
 
-fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSTextField> {
-    let rect = NSRect::new(NSPoint::new(8.0, 0.0), NSSize::new(PANEL_WIDTH - 16.0, ROW_H));
-    let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect);
-    let text = if item.subtitle.is_empty() {
-        format!("{}   [{}]", item.title, item.source)
-    } else {
-        format!("{}      {}   [{}]", item.title, item.subtitle, item.source)
-    };
-    field.setStringValue(&NSString::from_str(&text));
+fn make_label(
+    mtm: MainThreadMarker,
+    text: &str,
+    size: f64,
+    bold: bool,
+    color: &NSColor,
+) -> Retained<NSTextField> {
+    let field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0)),
+    );
+    field.setStringValue(&NSString::from_str(text));
     field.setBezeled(false);
+    field.setBordered(false);
     field.setDrawsBackground(false);
     field.setEditable(false);
     field.setSelectable(false);
-    field.setFont(Some(&NSFont::systemFontOfSize(15.0)));
+    let font = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    field.setFont(Some(&font));
+    field.setTextColor(Some(color));
     field
+}
+
+fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
+    if let Some(path) = &item.icon_path {
+        let workspace = NSWorkspace::sharedWorkspace();
+        return Some(workspace.iconForFile(&NSString::from_str(path)));
+    }
+    let symbol = match item.source {
+        "Calc" => "function",
+        "AI" => "sparkles",
+        "Web" => "globe",
+        "Clip" => "doc.on.clipboard",
+        "Command" => "terminal",
+        "Plugin" => "puzzlepiece.extension",
+        "?" => "wand.and.stars",
+        _ => "magnifyingglass",
+    };
+    NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol), None)
+}
+
+fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
+    let width = PANEL_WIDTH - 16.0;
+    let container = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, ROW_H)),
+    );
+
+    let icon_view = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(12.0, (ROW_H - ROW_ICON) / 2.0),
+            NSSize::new(ROW_ICON, ROW_ICON),
+        ),
+    );
+    if let Some(image) = row_icon(item) {
+        icon_view.setImage(Some(&image));
+    }
+    icon_view.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+    container.addSubview(&icon_view);
+
+    let text_x = 12.0 + ROW_ICON + 12.0;
+    let text_w = width - text_x - 14.0;
+
+    if item.subtitle.is_empty() {
+        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
+        title.setFrame(NSRect::new(
+            NSPoint::new(text_x, (ROW_H - 22.0) / 2.0),
+            NSSize::new(text_w, 22.0),
+        ));
+        container.addSubview(&title);
+    } else {
+        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
+        title.setFrame(NSRect::new(
+            NSPoint::new(text_x, ROW_H / 2.0 - 1.0),
+            NSSize::new(text_w, 21.0),
+        ));
+        container.addSubview(&title);
+        let subtitle = make_label(mtm, &item.subtitle, 12.0, false, &NSColor::secondaryLabelColor());
+        subtitle.setFrame(NSRect::new(
+            NSPoint::new(text_x, ROW_H / 2.0 - 19.0),
+            NSSize::new(text_w, 18.0),
+        ));
+        container.addSubview(&subtitle);
+    }
+
+    container
 }
 
 struct PanelViews {
     panel: Retained<LcPanel>,
-    search: Retained<NSSearchField>,
+    search: Retained<NSTextField>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
+    separator: Retained<NSBox>,
     critter: Retained<NSImageView>,
+    critter_label: Retained<NSTextField>,
 }
 
 fn build_panel(mtm: MainThreadMarker) -> PanelViews {
@@ -705,15 +886,17 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
             | NSWindowCollectionBehavior::Stationary,
     );
 
-    // Vibrancy background with rounded corners.
+    // Frosted translucent background with clipped rounded corners. Sidebar is a
+    // clean, system-adaptive material that reads well as a Spotlight-style panel.
     let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content_rect);
-    effect.setMaterial(NSVisualEffectMaterial::HUDWindow);
+    effect.setMaterial(NSVisualEffectMaterial::Sidebar);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
     effect.setWantsLayer(true);
     if let Some(layer) = effect.layer() {
         unsafe {
-            let _: () = msg_send![&*layer, setCornerRadius: 12.0_f64];
+            let _: () = msg_send![&*layer, setCornerRadius: CORNER_RADIUS];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
         }
     }
     effect.setAutoresizingMask(
@@ -721,11 +904,19 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
             | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
     );
 
+    // Borderless, transparent, large text field for a native Spotlight feel.
     let search_rect = NSRect::new(
-        NSPoint::new(14.0, 14.0),
-        NSSize::new(PANEL_WIDTH - 28.0, 36.0),
+        NSPoint::new(22.0, 14.0),
+        NSSize::new(PANEL_WIDTH - 44.0, 40.0),
     );
-    let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), search_rect);
+    let search = NSTextField::initWithFrame(NSTextField::alloc(mtm), search_rect);
+    search.setBezeled(false);
+    search.setBordered(false);
+    search.setDrawsBackground(false);
+    search.setEditable(true);
+    search.setSelectable(true);
+    search.setFocusRingType(NSFocusRingType::None);
+    search.setFont(Some(&NSFont::systemFontOfSize(24.0)));
     search.setPlaceholderString(Some(&NSString::from_str("Search litecast...")));
 
     // Results table inside a scroll view.
@@ -748,17 +939,40 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     scroll.setHasVerticalScroller(true);
     scroll.setDrawsBackground(false);
 
+    // Native hairline separator between the search field and results.
+    let separator = NSBox::initWithFrame(
+        NSBox::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, 1.0)),
+    );
+    separator.setBoxType(NSBoxType::Separator);
+    separator.setHidden(true);
+
     // Critter image view, kept on top and hidden until it walks.
     let critter = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
-        NSRect::new(NSPoint::new(-28.0, 2.0), NSSize::new(28.0, 28.0)),
+        NSRect::new(NSPoint::new(-30.0, 2.0), NSSize::new(30.0, 30.0)),
     );
     critter.setHidden(true);
     critter.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
 
+    // Built-in glyph critter (used when no GIFs are installed).
+    let critter_label = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(-30.0, 2.0), NSSize::new(30.0, 30.0)),
+    );
+    critter_label.setBezeled(false);
+    critter_label.setBordered(false);
+    critter_label.setDrawsBackground(false);
+    critter_label.setEditable(false);
+    critter_label.setSelectable(false);
+    critter_label.setHidden(true);
+    critter_label.setFont(Some(&NSFont::systemFontOfSize(22.0)));
+
     effect.addSubview(&search);
     effect.addSubview(&scroll);
+    effect.addSubview(&separator);
     effect.addSubview(&critter);
+    effect.addSubview(&critter_label);
     panel.setContentView(Some(&effect));
 
     PanelViews {
@@ -766,7 +980,9 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
         search,
         table,
         scroll,
+        separator,
         critter,
+        critter_label,
     }
 }
 
@@ -785,6 +1001,7 @@ fn build_engine(history: History, config: &Config) -> Engine {
 }
 
 fn main() {
+    eprintln!("[litecast] starting; press Option+Space to toggle the panel");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -795,7 +1012,9 @@ fn main() {
         search,
         table,
         scroll,
+        separator,
         critter,
+        critter_label,
     } = views;
 
     // Load critter GIFs (if any) only when the feature is enabled.
@@ -817,12 +1036,22 @@ fn main() {
     let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
     let toggle_hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
     let shot_hotkey = HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
-    manager
-        .register(toggle_hotkey)
-        .expect("failed to register toggle hotkey");
-    manager
-        .register(shot_hotkey)
-        .expect("failed to register screenshot hotkey");
+    match manager.register(toggle_hotkey) {
+        Ok(()) => eprintln!(
+            "[litecast] registered toggle hotkey Option+Space (id={})",
+            toggle_hotkey.id()
+        ),
+        Err(e) => eprintln!("[litecast] FAILED to register toggle hotkey Option+Space: {e}"),
+    }
+    match manager.register(shot_hotkey) {
+        Ok(()) => eprintln!(
+            "[litecast] registered screenshot hotkey Option+Shift+Space (id={})",
+            shot_hotkey.id()
+        ),
+        Err(e) => {
+            eprintln!("[litecast] FAILED to register screenshot hotkey Option+Shift+Space: {e}")
+        }
+    }
     let toggle_id = toggle_hotkey.id();
     let shot_id = shot_hotkey.id();
 
@@ -835,6 +1064,7 @@ fn main() {
         search,
         table,
         scroll,
+        separator,
         visible: Cell::new(false),
         results: RefCell::new(Vec::new()),
         generation: Cell::new(0),
@@ -850,6 +1080,7 @@ fn main() {
         playful_placeholders: config.ui.playful_placeholders,
         placeholder_idx: Cell::new(0),
         critter_view: critter,
+        critter_label,
         critter_images,
         critter_idx: Cell::new(0),
         _hotkey_manager: manager,
@@ -912,6 +1143,10 @@ fn main() {
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {
+            eprintln!(
+                "[litecast] hotkey event id={} state={:?}",
+                event.id, event.state
+            );
             if event.state != HotKeyState::Pressed {
                 continue;
             }
@@ -952,7 +1187,7 @@ fn main() {
     // open and critter GIFs are installed.
     let _critter_timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            23.0,
+            14.0,
             target,
             sel!(walkCritter:),
             None,

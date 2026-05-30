@@ -54,14 +54,17 @@ impl Provider for FilesProvider {
 
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         for (score, name, path) in scored.into_iter().take(self.max_results) {
-            out.push(Item::new(
-                name,
-                path.clone(),
-                "File",
-                // Below apps (which get a +100 bias) but above the web fallback.
-                score,
-                Action::Open(path),
-            ));
+            out.push(
+                Item::new(
+                    name,
+                    path.clone(),
+                    "File",
+                    // Below apps (which get a +100 bias) but above the web fallback.
+                    score,
+                    Action::Open(path.clone()),
+                )
+                .with_icon(path),
+            );
         }
     }
 }
