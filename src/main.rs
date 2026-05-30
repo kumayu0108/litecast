@@ -37,7 +37,7 @@ use objc2_foundation::{
 use clipboard::History;
 use config::{AiConfig, Config};
 use currency::CurrencyCache;
-use engine::Engine;
+use engine::{Engine, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
@@ -148,8 +148,12 @@ struct Ivars {
     results: RefCell<Vec<Item>>,
     /// Monotonic query id; results tagged with a stale id are discarded.
     generation: Cell<u64>,
-    /// Sends (generation, query) to the background worker.
-    query_tx: mpsc::Sender<(u64, String)>,
+    /// Sends (generation, query, filter) to the background worker.
+    query_tx: mpsc::Sender<(u64, String, Filter)>,
+    /// Active category filter; driven by both `@prefix` typing and Tab cycling.
+    active_filter: Cell<Filter>,
+    /// Small pill near the search field showing the active filter (hidden on All).
+    chip: Retained<NSTextField>,
     /// Latest computed results awaiting application on the main thread.
     pending: PendingResults,
     /// Clipboard history shared with the watcher timer.
@@ -329,8 +333,20 @@ define_class!(
             } else if selector == sel!(insertNewline:) {
                 self.activate_selection();
                 true
+            } else if selector == sel!(insertTab:) {
+                // Tab cycles the category filter instead of moving focus.
+                self.cycle_filter(true);
+                true
+            } else if selector == sel!(insertBacktab:) {
+                self.cycle_filter(false);
+                true
             } else if selector == sel!(cancelOperation:) {
-                self.hide_and_reset();
+                // Esc clears an active filter first; only then closes the panel.
+                if self.ivars().active_filter.get() != Filter::All {
+                    self.set_filter(Filter::All);
+                } else {
+                    self.hide_and_reset();
+                }
                 true
             } else {
                 false
@@ -369,6 +385,21 @@ impl AppDelegate {
         } else {
             self.show();
         }
+    }
+
+    /// Advance the active filter forward (Tab) or backward (Shift+Tab).
+    fn cycle_filter(&self, forward: bool) {
+        let current = self.ivars().active_filter.get();
+        let next = if forward { current.next() } else { current.prev() };
+        self.set_filter(next);
+    }
+
+    /// Set the active filter, refresh the chip + layout, and re-run the query.
+    fn set_filter(&self, filter: Filter) {
+        let ivars = self.ivars();
+        ivars.active_filter.set(filter);
+        self.layout(ivars.results.borrow().len());
+        self.dispatch_query();
     }
 
     fn show(&self) {
@@ -439,6 +470,7 @@ impl AppDelegate {
         ivars.panel.orderOut(None);
         ivars.visible.set(false);
         ivars.pending_confirm.set(-1);
+        ivars.active_filter.set(Filter::All);
         // Bump the generation so any in-flight worker results are discarded.
         ivars.generation.set(ivars.generation.get().wrapping_add(1));
         // Clear state for the next invocation.
@@ -454,7 +486,20 @@ impl AppDelegate {
     fn dispatch_query(&self) {
         let ivars = self.ivars();
         ivars.pending_confirm.set(-1);
-        let query = ivars.search.stringValue().to_string();
+        let raw = ivars.search.stringValue().to_string();
+        // A typed `@token ` prefix sets the same sticky filter the chip uses,
+        // and the remainder becomes the actual query.
+        let query = match parse_filter_prefix(&raw) {
+            Some((filter, rest)) => {
+                if ivars.active_filter.get() != filter {
+                    ivars.active_filter.set(filter);
+                    self.layout(ivars.results.borrow().len());
+                }
+                rest
+            }
+            None => raw,
+        };
+        let filter = ivars.active_filter.get();
         let generation = ivars.generation.get().wrapping_add(1);
         ivars.generation.set(generation);
 
@@ -495,7 +540,7 @@ impl AppDelegate {
             self.layout(0);
             return;
         }
-        let _ = ivars.query_tx.send((generation, query));
+        let _ = ivars.query_tx.send((generation, query, filter));
     }
 
     fn apply_pending_results(&self) {
@@ -738,6 +783,29 @@ impl AppDelegate {
         );
         ivars.panel.setFrame_display(frame, true);
 
+        // Filter chip on the right of the search area (hidden when unfiltered).
+        // It is laid out first so the search field can reserve room for it.
+        let filter = ivars.active_filter.get();
+        let mut search_right = PANEL_WIDTH - 22.0;
+        if filter == Filter::All {
+            ivars.chip.setHidden(true);
+        } else {
+            let chip = &ivars.chip;
+            chip.setStringValue(&NSString::from_str(filter.label()));
+            chip.sizeToFit();
+            let natural_w = chip.frame().size.width;
+            let chip_h = (line_height(12.0, true) + 6.0).round();
+            let chip_w = (natural_w + 18.0).round();
+            let chip_x = PANEL_WIDTH - 22.0 - chip_w;
+            let chip_y = (results_h + (SEARCH_AREA_H - chip_h) / 2.0).round();
+            chip.setFrame(NSRect::new(
+                NSPoint::new(chip_x, chip_y),
+                NSSize::new(chip_w, chip_h),
+            ));
+            chip.setHidden(false);
+            search_right = chip_x - 12.0;
+        }
+
         // Search field sized to its exact text height and centered in the top
         // search area, so the text sits on the vertical midline (a tall field
         // would top-align its text instead).
@@ -745,7 +813,7 @@ impl AppDelegate {
         let search_y = (results_h + (SEARCH_AREA_H - search_h) / 2.0).round();
         let search_frame = NSRect::new(
             NSPoint::new(22.0, search_y),
-            NSSize::new(PANEL_WIDTH - 44.0, search_h),
+            NSSize::new((search_right - 22.0).max(40.0), search_h),
         );
         ivars.search.setFrame(search_frame);
 
@@ -805,6 +873,20 @@ fn answer_to_items(answer: &str) -> Vec<Item> {
             Item::new(line, subtitle, "AI", 0, Action::CopyText(full.clone()))
         })
         .collect()
+}
+
+/// Parse a leading `@token` filter prefix. Returns the matched filter and the
+/// remaining query (the text after the token), or `None` if there is no valid
+/// `@token`. Examples: `@apps safari` -> (Apps, "safari"), `@clip` -> (Clip, "").
+fn parse_filter_prefix(raw: &str) -> Option<(Filter, String)> {
+    let trimmed = raw.trim_start();
+    let rest = trimmed.strip_prefix('@')?;
+    let (token, after) = match rest.split_once(char::is_whitespace) {
+        Some((t, a)) => (t, a.trim_start()),
+        None => (rest, ""),
+    };
+    let filter = Filter::from_token(&token.to_ascii_lowercase())?;
+    Some((filter, after.to_string()))
 }
 
 /// Exact line height for the system font at `size`. A single-line NSTextField
@@ -924,6 +1006,7 @@ struct PanelViews {
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
     separator: Retained<NSBox>,
+    chip: Retained<NSTextField>,
     critter: Retained<NSImageView>,
     critter_label: Retained<NSTextField>,
 }
@@ -1018,6 +1101,30 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     separator.setBoxType(NSBoxType::Separator);
     separator.setHidden(true);
 
+    // Filter chip: a small rounded accent pill showing the active category.
+    let chip = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(40.0, 20.0)),
+    );
+    chip.setBezeled(false);
+    chip.setBordered(false);
+    chip.setEditable(false);
+    chip.setSelectable(false);
+    chip.setDrawsBackground(true);
+    chip.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+    chip.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
+    let accent = NSColor::controlAccentColor();
+    chip.setTextColor(Some(&accent));
+    chip.setBackgroundColor(Some(&accent.colorWithAlphaComponent(0.18)));
+    chip.setWantsLayer(true);
+    if let Some(layer) = chip.layer() {
+        unsafe {
+            let _: () = msg_send![&*layer, setCornerRadius: 9.0_f64];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
+        }
+    }
+    chip.setHidden(true);
+
     // Critter image view, kept on top and hidden until it walks.
     let critter = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
@@ -1042,6 +1149,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     effect.addSubview(&search);
     effect.addSubview(&scroll);
     effect.addSubview(&separator);
+    effect.addSubview(&chip);
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
     panel.setContentView(Some(&effect));
@@ -1052,6 +1160,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
         table,
         scroll,
         separator,
+        chip,
         critter,
         critter_label,
     }
@@ -1059,23 +1168,38 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
 
 fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine {
     let mut engine = Engine::new(frecency);
-    engine.add(Box::new(EasterEggProvider));
-    engine.add(Box::new(AiProvider::new(config.ai.clone())));
-    engine.add(Box::new(CalcProvider));
+    // EasterEgg is general fun: only shown when no filter is active.
+    engine.add(Box::new(EasterEggProvider), Filter::All);
+    engine.add(Box::new(AiProvider::new(config.ai.clone())), Filter::Ai);
+    engine.add(Box::new(CalcProvider), Filter::Calc);
     let currency = CurrencyCache::new(config.conversion.currency_ttl_hours);
     // Warm the rate cache in the background so the first currency query is fast.
     currency.refresh_async();
-    engine.add(Box::new(ConvertProvider::new(currency)));
-    engine.add(Box::new(EmojiProvider));
-    engine.add(Box::new(ClipboardProvider::new(history)));
-    engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
-    engine.add(Box::new(QuicklinksProvider::new(config.quicklinks.clone())));
-    engine.add(Box::new(SnippetsProvider::new(config.snippets.entries.clone())));
-    engine.add(Box::new(SystemProvider::new()));
-    engine.add(Box::new(PluginProvider::new()));
-    engine.add(Box::new(AppsProvider::new()));
-    engine.add(Box::new(FilesProvider::new()));
-    engine.add(Box::new(WebSearchProvider::new(config.web_search_url.clone())));
+    engine.add(Box::new(ConvertProvider::new(currency)), Filter::Calc);
+    engine.add(Box::new(EmojiProvider), Filter::Emoji);
+    engine.add(Box::new(ClipboardProvider::new(history)), Filter::Clip);
+    // The "Commands" category groups user commands, quicklinks, snippets,
+    // plugins, and system actions.
+    engine.add(
+        Box::new(CommandsProvider::new(config.commands.clone())),
+        Filter::Cmd,
+    );
+    engine.add(
+        Box::new(QuicklinksProvider::new(config.quicklinks.clone())),
+        Filter::Cmd,
+    );
+    engine.add(
+        Box::new(SnippetsProvider::new(config.snippets.entries.clone())),
+        Filter::Cmd,
+    );
+    engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
+    engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
+    engine.add(Box::new(AppsProvider::new()), Filter::Apps);
+    engine.add(Box::new(FilesProvider::new()), Filter::Files);
+    engine.add(
+        Box::new(WebSearchProvider::new(config.web_search_url.clone())),
+        Filter::Web,
+    );
     engine
 }
 
@@ -1092,6 +1216,7 @@ fn main() {
         table,
         scroll,
         separator,
+        chip,
         critter,
         critter_label,
     } = views;
@@ -1134,7 +1259,7 @@ fn main() {
     let toggle_id = toggle_hotkey.id();
     let shot_id = shot_hotkey.id();
 
-    let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
+    let (query_tx, query_rx) = mpsc::channel::<(u64, String, Filter)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50);
     let frecency = Frecency::load();
@@ -1149,6 +1274,8 @@ fn main() {
         results: RefCell::new(Vec::new()),
         generation: Cell::new(0),
         query_tx,
+        active_filter: Cell::new(Filter::All),
+        chip,
         pending: pending.clone(),
         clip_history: history.clone(),
         last_change: Cell::new(-1),
@@ -1197,13 +1324,14 @@ fn main() {
         let engine = Arc::new(build_engine(history.clone(), &config, frecency.clone()));
         let pending = pending.clone();
         std::thread::spawn(move || {
-            while let Ok((mut generation, mut query)) = query_rx.recv() {
+            while let Ok((mut generation, mut query, mut filter)) = query_rx.recv() {
                 // Coalesce: skip to the most recent queued query.
-                while let Ok((g, q)) = query_rx.try_recv() {
+                while let Ok((g, q, f)) = query_rx.try_recv() {
                     generation = g;
                     query = q;
+                    filter = f;
                 }
-                let items = engine.query(&query);
+                let items = engine.query(&query, filter);
                 if let Ok(mut slot) = pending.lock() {
                     *slot = Some((generation, items));
                 }
