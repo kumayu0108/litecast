@@ -30,6 +30,12 @@ web_search_url = "https://www.google.com/search?q={}"
 # text = "1 Main St, Springfield"
 # paste = false
 
+# Unit & currency conversion. Type natural queries like "10 km in mi",
+# "100 f to c", or "100 usd to eur". Currency rates are fetched from key-less
+# public APIs and cached on disk; this controls how long the cache is reused.
+[conversion]
+currency_ttl_hours = 12
+
 [ai]
 # Backend: "anthropic", "openai", or "cursor" (OpenAI-compatible endpoint).
 provider = "anthropic"
@@ -48,6 +54,7 @@ pub struct Config {
     pub web_search_url: String,
     pub commands: Vec<CommandConfig>,
     pub snippets: SnippetsConfig,
+    pub conversion: ConversionConfig,
     pub ai: AiConfig,
     pub ui: UiConfig,
 }
@@ -58,8 +65,24 @@ impl Default for Config {
             web_search_url: "https://www.google.com/search?q={}".to_string(),
             commands: Vec::new(),
             snippets: SnippetsConfig::default(),
+            conversion: ConversionConfig::default(),
             ai: AiConfig::default(),
             ui: UiConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ConversionConfig {
+    /// Hours before cached currency rates are considered stale and refreshed.
+    pub currency_ttl_hours: u64,
+}
+
+impl Default for ConversionConfig {
+    fn default() -> Self {
+        Self {
+            currency_ttl_hours: 12,
         }
     }
 }

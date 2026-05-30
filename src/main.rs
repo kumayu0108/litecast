@@ -2,6 +2,7 @@ mod ai;
 mod clipboard;
 mod config;
 mod critters;
+mod currency;
 mod engine;
 mod frecency;
 mod model;
@@ -35,13 +36,14 @@ use objc2_foundation::{
 
 use clipboard::History;
 use config::{AiConfig, Config};
+use currency::CurrencyCache;
 use engine::Engine;
 use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
-    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, EasterEggProvider,
-    EmojiProvider, FilesProvider, PluginProvider, SnippetsProvider, SystemProvider,
-    WebSearchProvider,
+    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
+    EasterEggProvider, EmojiProvider, FilesProvider, PluginProvider, SnippetsProvider,
+    SystemProvider, WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -1027,6 +1029,10 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     engine.add(Box::new(EasterEggProvider));
     engine.add(Box::new(AiProvider::new(config.ai.clone())));
     engine.add(Box::new(CalcProvider));
+    let currency = CurrencyCache::new(config.conversion.currency_ttl_hours);
+    // Warm the rate cache in the background so the first currency query is fast.
+    currency.refresh_async();
+    engine.add(Box::new(ConvertProvider::new(currency)));
     engine.add(Box::new(EmojiProvider));
     engine.add(Box::new(ClipboardProvider::new(history)));
     engine.add(Box::new(CommandsProvider::new(config.commands.clone())));
