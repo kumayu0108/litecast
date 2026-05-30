@@ -23,13 +23,21 @@ impl Provider for AiProvider {
 
     fn query(&self, query: &str, out: &mut Vec<Item>) {
         let provider = &self.config.provider;
+        let q = query.trim();
+        let lower = q.to_ascii_lowercase();
 
-        if let Some(key) = query.trim().strip_prefix("setkey ") {
-            let key = key.trim();
-            if !key.is_empty() {
+        // `setkey <key>` (and the friendlier `set key <key>`) stores a key.
+        let key_input = q
+            .strip_prefix("setkey ")
+            .or_else(|| q.strip_prefix("set key "))
+            .map(str::trim);
+        if let Some(key) = key_input {
+            if key.is_empty() {
+                self.push_setup_guide(out);
+            } else {
                 out.push(Item::new(
-                    format!("Save {provider} API key"),
-                    "Press Enter to store it securely in the Keychain",
+                    format!("Save {} API key", friendly_name(provider)),
+                    format!("Press Enter to store it securely in the Keychain (service \"litecast\", provider \"{provider}\")"),
                     "AI",
                     11_000,
                     Action::SetApiKey {
@@ -41,13 +49,19 @@ impl Provider for AiProvider {
             return;
         }
 
+        // `setup` / `setkey` / `api key` open the guided key-setup flow.
+        if matches!(lower.as_str(), "setup" | "setkey" | "set key" | "api key" | "apikey") {
+            self.push_setup_guide(out);
+            return;
+        }
+
         let Some(prompt) = query.strip_prefix('?') else {
             return;
         };
         let prompt = prompt.trim();
         if prompt.is_empty() {
             out.push(Item::new(
-                format!("Ask {provider}..."),
+                format!("Ask {}...", friendly_name(provider)),
                 "Type your question after ? then press Enter",
                 "AI",
                 10_500,
@@ -56,19 +70,24 @@ impl Provider for AiProvider {
             return;
         }
 
+        // Friendly first-run hint: no key configured but the user is trying to
+        // ask. Point them at `setup` and offer to open the key page directly.
         if secrets::get_api_key(provider).is_none() {
             out.push(Item::new(
-                format!("No API key set for {provider}"),
-                "Type: setkey <your-api-key> then Enter".to_string(),
+                format!("Set up {} first - no API key yet", friendly_name(provider)),
+                "Type `setup` for a guided walkthrough, or Enter to open the key page".to_string(),
                 "AI",
-                10_500,
-                Action::None,
+                10_600,
+                match key_page(provider) {
+                    Some(url) => Action::Open(url.to_string()),
+                    None => Action::None,
+                },
             ));
             return;
         }
 
         out.push(Item::new(
-            format!("Ask {provider}: {prompt}"),
+            format!("Ask {}: {prompt}", friendly_name(provider)),
             "Press Enter to send",
             "AI",
             10_500,
@@ -77,5 +96,80 @@ impl Provider for AiProvider {
                 image: None,
             },
         ));
+    }
+}
+
+impl AiProvider {
+    /// A short guided key-setup flow shown for `setup` / `setkey` with no key:
+    /// where to get a key for the active provider, then how to store it.
+    fn push_setup_guide(&self, out: &mut Vec<Item>) {
+        let provider = &self.config.provider;
+        let name = friendly_name(provider);
+        let has_key = secrets::get_api_key(provider).is_some();
+
+        let status = if has_key {
+            format!("A key is already saved for {name}. Run `setkey <new-key>` to replace it.")
+        } else {
+            format!("No key saved yet for {name}.")
+        };
+        out.push(Item::new(
+            format!("AI setup - active provider: {name}"),
+            status,
+            "AI",
+            11_050,
+            Action::None,
+        ));
+
+        if let Some(url) = key_page(provider) {
+            out.push(Item::new(
+                format!("1. Get a {name} API key"),
+                format!("Press Enter to open {url}"),
+                "AI",
+                11_040,
+                Action::Open(url.to_string()),
+            ));
+        }
+        out.push(Item::new(
+            "2. Store it in litecast",
+            "Type `setkey <your-api-key>` then Enter - saved to the macOS Keychain",
+            "AI",
+            11_030,
+            Action::None,
+        ));
+        out.push(Item::new(
+            "3. Ask away",
+            "Type `? your question` and press Enter (Esc exits chat)",
+            "AI",
+            11_020,
+            Action::None,
+        ));
+        out.push(Item::new(
+            "Change provider/model",
+            "Edit the [ai] section of config.toml (provider/model/endpoint)",
+            "AI",
+            11_010,
+            Action::None,
+        ));
+    }
+}
+
+/// Human-friendly provider name for prompts and setup copy.
+fn friendly_name(provider: &str) -> &str {
+    match provider {
+        "anthropic" => "Anthropic Claude",
+        "openai" => "OpenAI",
+        "gemini" | "google" => "Google Gemini",
+        "openai-compatible" | "cursor" => "your OpenAI-compatible endpoint",
+        other => other,
+    }
+}
+
+/// The page where a user can create an API key for the given provider.
+fn key_page(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("https://console.anthropic.com/settings/keys"),
+        "openai" => Some("https://platform.openai.com/api-keys"),
+        "gemini" | "google" => Some("https://aistudio.google.com/app/apikey"),
+        _ => None,
     }
 }

@@ -85,7 +85,7 @@ impl AiCommandsProvider {
         if secrets::get_api_key(&self.provider).is_none() {
             out.push(Item::new(
                 format!("{} (no API key)", cmd.name),
-                "Type: setkey <your-api-key> then Enter",
+                "Type `setup` for a guided walkthrough, or `setkey <your-api-key>`",
                 "AI",
                 score,
                 Action::None,

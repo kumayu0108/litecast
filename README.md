@@ -114,10 +114,31 @@ Open the panel and start typing:
 - Enable `[window] enabled = true`, then type `win` (e.g. `win left`, `win max`) to snap the frontmost window (needs Accessibility).
 - Type `? your question` to ask the configured AI backend, then keep typing to continue the chat (Esc exits chat).
 - Quick AI commands: `translate`/`tr`, `summarize`/`sum`, `fixgrammar`/`fix`, `improve` (use an argument or the clipboard).
-- Type `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
+- Type `setup` for a guided AI-key walkthrough, or `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
 - Anything else offers a web search.
 
 Frequently and recently activated results are automatically boosted toward the top.
+
+### Getting started / setting your AI key
+
+The AI features (the `?` ask, the screenshot question, and the quick AI
+commands) need an API key for your chosen provider. Setup is in-app and takes a
+few seconds:
+
+1. Open the panel and type **`setup`**. litecast shows your active provider,
+   links to that provider's key page (press `Enter` to open it), and the exact
+   next steps.
+2. Create a key on the provider's site (Anthropic Console, OpenAI Platform, or
+   Google AI Studio).
+3. Back in litecast, type **`setkey <your-api-key>`** and press `Enter`. The key
+   is stored in the macOS **Keychain** (service `litecast`, under the active
+   provider) — never in a config file.
+4. Ask anything with **`? your question`**.
+
+If you try `? …` before setting a key, litecast shows a friendly hint and can
+open the key page for you. To switch providers, change `provider` in `[ai]` and
+`setkey` that provider's key. Run `setup` again any time to re-check status or
+replace a key.
 
 ### AI providers
 
