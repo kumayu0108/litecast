@@ -19,6 +19,15 @@ web_search_url = "https://www.google.com/search?q={}"
 # kind = "open"                       # "open" (file/url/app) or "shell"
 # target = "https://github.com/{}"
 
+# Quicklinks: parameterized URLs opened in your browser. Type the keyword plus
+# an argument (e.g. "ghr rust-lang/rust"); {query} is URL-encoded and
+# substituted. Without an argument, the link is fuzzy-matched by name.
+#
+# [[quicklinks]]
+# name = "GitHub repo"
+# keyword = "ghr"
+# url = "https://github.com/{query}"
+
 # Reusable text snippets. List them with the "snip" keyword (or "snip <filter>"),
 # or surface one directly via its own keyword. Enter copies the expanded text to
 # the clipboard so you can paste it. Supported placeholders in `text`:
@@ -53,6 +62,7 @@ critters = true
 pub struct Config {
     pub web_search_url: String,
     pub commands: Vec<CommandConfig>,
+    pub quicklinks: Vec<QuicklinkConfig>,
     pub snippets: SnippetsConfig,
     pub conversion: ConversionConfig,
     pub ai: AiConfig,
@@ -64,12 +74,23 @@ impl Default for Config {
         Self {
             web_search_url: "https://www.google.com/search?q={}".to_string(),
             commands: Vec::new(),
+            quicklinks: Vec::new(),
             snippets: SnippetsConfig::default(),
             conversion: ConversionConfig::default(),
             ai: AiConfig::default(),
             ui: UiConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuicklinkConfig {
+    pub name: String,
+    /// Optional keyword that triggers the link with a `{query}` argument.
+    #[serde(default)]
+    pub keyword: String,
+    /// URL template; `{query}` is replaced with the (URL-encoded) argument.
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

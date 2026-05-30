@@ -39,7 +39,7 @@ impl Provider for WebSearchProvider {
 }
 
 /// Minimal percent-encoding for query strings (RFC 3986 unreserved kept as-is).
-fn percent_encode(input: &str) -> String {
+pub(crate) fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len() * 3);
     for &byte in input.as_bytes() {
         match byte {
