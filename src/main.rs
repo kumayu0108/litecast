@@ -726,15 +726,18 @@ impl AppDelegate {
         );
         ivars.panel.setFrame_display(frame, true);
 
-        // Search field vertically centered in the top search area.
-        const SEARCH_H: f64 = 40.0;
+        // Search field sized to its exact text height and centered in the top
+        // search area, so the text sits on the vertical midline (a tall field
+        // would top-align its text instead).
+        let search_h = line_height(24.0, false);
+        let search_y = (results_h + (SEARCH_AREA_H - search_h) / 2.0).round();
         let search_frame = NSRect::new(
-            NSPoint::new(22.0, results_h + (SEARCH_AREA_H - SEARCH_H) / 2.0),
-            NSSize::new(PANEL_WIDTH - 44.0, SEARCH_H),
+            NSPoint::new(22.0, search_y),
+            NSSize::new(PANEL_WIDTH - 44.0, search_h),
         );
         ivars.search.setFrame(search_frame);
 
-        // Hairline separator between the search field and the results.
+        // Hairline separator on the boundary between the search area and results.
         let separator_frame = NSRect::new(
             NSPoint::new(18.0, results_h),
             NSSize::new(PANEL_WIDTH - 36.0, 1.0),
@@ -790,6 +793,18 @@ fn answer_to_items(answer: &str) -> Vec<Item> {
             Item::new(line, subtitle, "AI", 0, Action::CopyText(full.clone()))
         })
         .collect()
+}
+
+/// Exact line height for the system font at `size`. A single-line NSTextField
+/// draws its text at the top of the cell, so we size label frames to this height
+/// and center those frames to achieve true vertical centering.
+fn line_height(size: f64, bold: bool) -> f64 {
+    let font = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    (font.ascender() - font.descender() + font.leading()).ceil()
 }
 
 fn make_label(
@@ -860,26 +875,32 @@ fn make_row_cell(mtm: MainThreadMarker, item: &Item) -> Retained<NSView> {
     let text_x = 12.0 + ROW_ICON + 12.0;
     let text_w = width - text_x - 14.0;
 
+    let title_h = line_height(15.0, true);
     if item.subtitle.is_empty() {
+        // Single line: center the title band within the row.
+        let y = ((ROW_H - title_h) / 2.0).round();
         let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
-        title.setFrame(NSRect::new(
-            NSPoint::new(text_x, (ROW_H - 22.0) / 2.0),
-            NSSize::new(text_w, 22.0),
-        ));
+        title.setFrame(NSRect::new(NSPoint::new(text_x, y), NSSize::new(text_w, title_h)));
         container.addSubview(&title);
     } else {
-        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
-        title.setFrame(NSRect::new(
-            NSPoint::new(text_x, ROW_H / 2.0 - 1.0),
-            NSSize::new(text_w, 21.0),
-        ));
-        container.addSubview(&title);
-        let subtitle = make_label(mtm, &item.subtitle, 12.0, false, &NSColor::secondaryLabelColor());
+        // Two lines: center the (title + gap + subtitle) block within the row.
+        const GAP: f64 = 2.0;
+        let sub_h = line_height(12.0, false);
+        let block = title_h + GAP + sub_h;
+        let bottom = ((ROW_H - block) / 2.0).round();
+        let subtitle =
+            make_label(mtm, &item.subtitle, 12.0, false, &NSColor::secondaryLabelColor());
         subtitle.setFrame(NSRect::new(
-            NSPoint::new(text_x, ROW_H / 2.0 - 19.0),
-            NSSize::new(text_w, 18.0),
+            NSPoint::new(text_x, bottom),
+            NSSize::new(text_w, sub_h),
         ));
         container.addSubview(&subtitle);
+        let title = make_label(mtm, &item.title, 15.0, true, &NSColor::labelColor());
+        title.setFrame(NSRect::new(
+            NSPoint::new(text_x, bottom + sub_h + GAP),
+            NSSize::new(text_w, title_h),
+        ));
+        container.addSubview(&title);
     }
 
     container
