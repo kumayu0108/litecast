@@ -44,7 +44,8 @@ impl Provider for AppsProvider {
                         ranked,
                         Action::Open(path.clone()),
                     )
-                    .with_icon(path),
+                    .with_icon(path.clone())
+                    .with_id(format!("app:{path}")),
                 );
             }
         }

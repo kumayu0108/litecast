@@ -62,4 +62,5 @@ fn build_item(cmd: &CommandConfig, arg: &str, score: i64) -> Item {
         cmd.subtitle.clone()
     };
     Item::new(cmd.name.clone(), subtitle, "Command", score, action)
+        .with_id(format!("cmd:{}", cmd.name))
 }

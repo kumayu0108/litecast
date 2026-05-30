@@ -28,6 +28,10 @@ pub struct Item {
     pub source: &'static str,
     /// Optional path used to render a system icon to the left of the row.
     pub icon_path: Option<String>,
+    /// Stable identity for frecency tracking (e.g. "app:/Applications/Safari.app").
+    /// `None` for volatile results (calc, conversions, AI answers) that should
+    /// not be learned.
+    pub id: Option<String>,
 }
 
 impl Item {
@@ -45,12 +49,19 @@ impl Item {
             score,
             source,
             icon_path: None,
+            id: None,
         }
     }
 
     /// Attach a filesystem path whose system icon should be shown for this row.
     pub fn with_icon(mut self, path: impl Into<String>) -> Self {
         self.icon_path = Some(path.into());
+        self
+    }
+
+    /// Attach a stable identity so the item participates in frecency ranking.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
         self
     }
 }

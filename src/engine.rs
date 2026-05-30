@@ -1,3 +1,4 @@
+use crate::frecency::Frecency;
 use crate::model::Item;
 
 /// A source of results for a query. Providers are queried on each keystroke,
@@ -14,13 +15,15 @@ pub trait Provider: Send + Sync {
 pub struct Engine {
     providers: Vec<Box<dyn Provider>>,
     max_results: usize,
+    frecency: Frecency,
 }
 
 impl Engine {
-    pub fn new() -> Self {
+    pub fn new(frecency: Frecency) -> Self {
         Self {
             providers: Vec::new(),
             max_results: 8,
+            frecency,
         }
     }
 
@@ -36,6 +39,13 @@ impl Engine {
         }
         for provider in &self.providers {
             provider.query(query, &mut out);
+        }
+        // Nudge frequently/recently used items up (bounded, never overrides
+        // intentful high-score results).
+        for item in &mut out {
+            if let Some(id) = &item.id {
+                item.score += self.frecency.boost(id);
+            }
         }
         // Highest score first; stable so providers keep insertion order on ties.
         out.sort_by(|a, b| b.score.cmp(&a.score));

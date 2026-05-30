@@ -3,6 +3,7 @@ mod clipboard;
 mod config;
 mod critters;
 mod engine;
+mod frecency;
 mod model;
 mod paths;
 mod providers;
@@ -35,6 +36,7 @@ use objc2_foundation::{
 use clipboard::History;
 use config::{AiConfig, Config};
 use engine::Engine;
+use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
     AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, EasterEggProvider,
@@ -161,6 +163,8 @@ struct Ivars {
     critter_images: Vec<Retained<NSImage>>,
     /// Rotating index into the critter image list.
     critter_idx: Cell<usize>,
+    /// Usage learner; records activations and boosts frequent/recent items.
+    frecency: Frecency,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -524,10 +528,10 @@ impl AppDelegate {
         if row < 0 {
             return;
         }
-        let action = {
+        let (action, id) = {
             let results = ivars.results.borrow();
             match results.get(row as usize) {
-                Some(item) => item.action.clone(),
+                Some(item) => (item.action.clone(), item.id.clone()),
                 None => return,
             }
         };
@@ -535,6 +539,9 @@ impl AppDelegate {
         if let Action::AskAi { prompt, image } = action {
             self.start_ai(prompt, image);
             return;
+        }
+        if let Some(id) = &id {
+            ivars.frecency.record(id);
         }
         if action.execute() {
             self.hide_and_reset();
@@ -986,8 +993,8 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
 }
 
-fn build_engine(history: History, config: &Config) -> Engine {
-    let mut engine = Engine::new();
+fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine {
+    let mut engine = Engine::new(frecency);
     engine.add(Box::new(EasterEggProvider));
     engine.add(Box::new(AiProvider::new(config.ai.clone())));
     engine.add(Box::new(CalcProvider));
@@ -1058,6 +1065,7 @@ fn main() {
     let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50);
+    let frecency = Frecency::load();
 
     let ivars = Ivars {
         panel,
@@ -1083,6 +1091,7 @@ fn main() {
         critter_label,
         critter_images,
         critter_idx: Cell::new(0),
+        frecency: frecency.clone(),
         _hotkey_manager: manager,
     };
 
@@ -1112,7 +1121,7 @@ fn main() {
     // sources like mdfind never block typing) and signals the main thread when
     // results are ready. Blocks on recv when idle, so it uses zero CPU.
     {
-        let engine = Arc::new(build_engine(history.clone(), &config));
+        let engine = Arc::new(build_engine(history.clone(), &config, frecency.clone()));
         let pending = pending.clone();
         std::thread::spawn(move || {
             while let Ok((mut generation, mut query)) = query_rx.recv() {
