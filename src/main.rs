@@ -25,7 +25,8 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSAnimationContext, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox, NSBoxType,
+    NSAnimationContext, NSBezelStyle, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox,
+    NSBoxType, NSButton, NSButtonType,
     NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
     NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
@@ -59,6 +60,11 @@ type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 720.0;
 const SEARCH_AREA_H: f64 = 66.0;
+// Spotlight-style category chip row that sits in its own band under the search
+// field. Chips are clickable and stay in sync with Tab-cycle and @prefix.
+const CHIP_ROW_H: f64 = 40.0;
+const CHIP_H: f64 = 24.0;
+const CHIP_GAP: f64 = 7.0;
 const PLACEHOLDER_NORMAL: &str = "Search litecast...";
 const PLACEHOLDER_SHOT: &str = "Ask about the screenshot, then press Enter...";
 const PLACEHOLDER_FOLLOWUP: &str = "Follow up, or press Esc to exit chat...";
@@ -219,10 +225,12 @@ struct Ivars {
     generation: Cell<u64>,
     /// Sends (generation, query, filter) to the background worker.
     query_tx: mpsc::Sender<(u64, String, Filter)>,
-    /// Active category filter; driven by both `@prefix` typing and Tab cycling.
+    /// Active category filter; driven by `@prefix` typing, Tab cycling, and
+    /// clicking a chip in the category row.
     active_filter: Cell<Filter>,
-    /// Small pill near the search field showing the active filter (hidden on All).
-    chip: Retained<NSTextField>,
+    /// Spotlight-style clickable category chips (one per `Filter::CYCLE` entry,
+    /// in order). The active one is highlighted; clicking one sets the filter.
+    chips: Vec<Retained<NSButton>>,
     /// Latest computed results awaiting application on the main thread.
     pending: PendingResults,
     /// Clipboard history shared with the watcher timer.
@@ -483,6 +491,18 @@ define_class!(
             match results.get(row as usize) {
                 Some(item) => Some(make_row_cell(self.mtm(), item)),
                 None => None,
+            }
+        }
+
+        // A category chip was clicked: activate its filter (same state the Tab
+        // cycle and @prefix drive) and return focus to the search field.
+        #[unsafe(method(chipClicked:))]
+        fn chip_clicked(&self, sender: &NSButton) {
+            let idx = sender.tag() as usize;
+            if let Some(filter) = Filter::CYCLE.get(idx).copied() {
+                self.set_filter(filter);
+                let ivars = self.ivars();
+                ivars.panel.makeFirstResponder(Some(&ivars.search));
             }
         }
     }
@@ -1152,8 +1172,11 @@ impl AppDelegate {
         } else {
             0.0
         };
-        let total_h = SEARCH_AREA_H + results_block;
-        // Top of the results block / bottom of the search area.
+        // Vertical bands, top to bottom: search area, category chip row, the
+        // hairline separator, then the results block. The chip row is always
+        // present, so it always contributes to the panel height.
+        let total_h = SEARCH_AREA_H + CHIP_ROW_H + results_block;
+        // Top of the results block / where the separator and chip row sit.
         let band_bottom = results_block;
 
         let mtm = self.mtm();
@@ -1174,52 +1197,33 @@ impl AppDelegate {
         );
         ivars.panel.setFrame_display(frame, true);
 
-        // Filter chip on the right of the search area. Always visible: a faint
-        // "Tab to filter" hint when unfiltered (discoverability), an accent pill
-        // showing the category when a filter is active. Laid out first so the
-        // search field can reserve room for it.
-        let filter = ivars.active_filter.get();
-        let chip = &ivars.chip;
-        let (label, text_color, bg_color) = if filter == Filter::All {
-            // Idle: a clearly-enabled (not greyed) affordance hinting the Tab key.
-            (
-                "\u{21e5} Filter".to_string(),
-                NSColor::secondaryLabelColor(),
-                NSColor::labelColor().colorWithAlphaComponent(0.10),
-            )
-        } else {
-            // Active: a high-contrast accent pill with readable text.
-            let accent = NSColor::controlAccentColor();
-            (
-                format!("\u{21e5} {}", filter.label()),
-                NSColor::alternateSelectedControlTextColor(),
-                accent.colorWithAlphaComponent(0.95),
-            )
-        };
-        chip.setStringValue(&NSString::from_str(&label));
-        chip.setTextColor(Some(&text_color));
-        chip.setBackgroundColor(Some(&bg_color));
-        chip.sizeToFit();
-        let natural_w = chip.frame().size.width;
-        let chip_h = (line_height(12.0, true) + 8.0).round();
-        let chip_w = (natural_w + 22.0).round();
-        let chip_x = PANEL_WIDTH - SIDE_INSET - chip_w;
-        let chip_y = (band_bottom + (SEARCH_AREA_H - chip_h) / 2.0).round();
-        chip.setFrame(NSRect::new(
-            NSPoint::new(chip_x, chip_y),
-            NSSize::new(chip_w, chip_h),
-        ));
-        chip.setHidden(false);
-        let search_right = chip_x - 12.0;
+        // Spotlight-style category chip row in its own band, just under the
+        // search field. Highlight reflects the active filter (driven equally by
+        // clicks, Tab cycling, and @prefix typing).
+        let active = ivars.active_filter.get();
+        let chip_y = (band_bottom + (CHIP_ROW_H - CHIP_H) / 2.0).round();
+        let mut chip_x = SIDE_INSET;
+        for (i, chip) in ivars.chips.iter().enumerate() {
+            let filter = Filter::CYCLE[i];
+            style_chip(chip, filter.label(), filter == active);
+            chip.sizeToFit();
+            let chip_w = chip.frame().size.width.round();
+            chip.setFrame(NSRect::new(
+                NSPoint::new(chip_x, chip_y),
+                NSSize::new(chip_w, CHIP_H),
+            ));
+            chip_x += chip_w + CHIP_GAP;
+        }
 
         // Search field sized to its exact text height and centered in the top
-        // search area, so the text sits on the vertical midline (a tall field
-        // would top-align its text instead).
+        // search area (which sits above the chip row), so the text lands on the
+        // vertical midline (a tall field would top-align its text instead).
         let search_h = line_height(24.0, false);
-        let search_y = (band_bottom + (SEARCH_AREA_H - search_h) / 2.0).round();
+        let search_y =
+            (band_bottom + CHIP_ROW_H + (SEARCH_AREA_H - search_h) / 2.0).round();
         let search_frame = NSRect::new(
             NSPoint::new(SIDE_INSET, search_y),
-            NSSize::new((search_right - SIDE_INSET).max(40.0), search_h),
+            NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, search_h),
         );
         ivars.search.setFrame(search_frame);
 
@@ -1465,6 +1469,64 @@ fn make_label(
     field
 }
 
+/// Build a Spotlight-style category chip button. Tagged with its index into
+/// `Filter::CYCLE` so the click handler can recover which filter it selects.
+fn make_chip(mtm: MainThreadMarker, idx: usize, label: &str) -> Retained<NSButton> {
+    let button = NSButton::initWithFrame(
+        NSButton::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, CHIP_H)),
+    );
+    button.setButtonType(NSButtonType::MomentaryChange);
+    button.setBezelStyle(NSBezelStyle::FlexiblePush);
+    button.setBordered(true);
+    button.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    button.setTitle(&NSString::from_str(label));
+    button.setTag(idx as isize);
+    button.setFocusRingType(NSFocusRingType::None);
+    button.setWantsLayer(true);
+    if let Some(layer) = button.layer() {
+        unsafe {
+            let _: () = msg_send![&*layer, setCornerRadius: CHIP_H / 2.0];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
+        }
+    }
+    button
+}
+
+/// Restyle a category chip for the current active state: an accent pill when
+/// active, a subtle (but clearly interactive) fill otherwise.
+fn style_chip(chip: &NSButton, label: &str, active: bool) {
+    let (text_color, bg) = if active {
+        (
+            NSColor::alternateSelectedControlTextColor(),
+            NSColor::controlAccentColor().colorWithAlphaComponent(0.95),
+        )
+    } else {
+        (
+            NSColor::secondaryLabelColor(),
+            NSColor::labelColor().colorWithAlphaComponent(0.08),
+        )
+    };
+    chip.setBezelColor(Some(&bg));
+    chip.setAttributedTitle(&chip_attr_title(label, &text_color, active));
+}
+
+/// Build a chip's attributed title (12pt; medium weight when active).
+fn chip_attr_title(label: &str, color: &NSColor, active: bool) -> Retained<NSAttributedString> {
+    fn anyobj<T: std::convert::AsRef<AnyObject>>(x: &T) -> &AnyObject {
+        x.as_ref()
+    }
+    let s = NSString::from_str(label);
+    let weight = if active { weight_medium() } else { weight_regular() };
+    let font = NSFont::systemFontOfSize_weight(12.0, weight);
+    let keys: [&NSString; 2] = [unsafe { NSFontAttributeName }, unsafe {
+        NSForegroundColorAttributeName
+    }];
+    let objs: [&AnyObject; 2] = [anyobj(&*font), anyobj(color)];
+    let attrs = NSDictionary::from_slices(&keys, &objs);
+    unsafe { NSAttributedString::new_with_attributes(&s, &attrs) }
+}
+
 fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
     if let Some(path) = &item.icon_path {
         let workspace = NSWorkspace::sharedWorkspace();
@@ -1640,7 +1702,7 @@ struct PanelViews {
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
     separator: Retained<NSBox>,
-    chip: Retained<NSTextField>,
+    chips: Vec<Retained<NSButton>>,
     critter: Retained<NSImageView>,
     critter_label: Retained<NSTextField>,
 }
@@ -1738,29 +1800,14 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     separator.setBoxType(NSBoxType::Separator);
     separator.setHidden(true);
 
-    // Filter chip: a small rounded accent pill showing the active category.
-    let chip = NSTextField::initWithFrame(
-        NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(40.0, 20.0)),
-    );
-    chip.setBezeled(false);
-    chip.setBordered(false);
-    chip.setEditable(false);
-    chip.setSelectable(false);
-    chip.setDrawsBackground(true);
-    chip.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-    chip.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
-    let accent = NSColor::controlAccentColor();
-    chip.setTextColor(Some(&accent));
-    chip.setBackgroundColor(Some(&accent.colorWithAlphaComponent(0.18)));
-    chip.setWantsLayer(true);
-    if let Some(layer) = chip.layer() {
-        unsafe {
-            let _: () = msg_send![&*layer, setCornerRadius: 9.0_f64];
-            let _: () = msg_send![&*layer, setMasksToBounds: true];
-        }
-    }
-    chip.setHidden(true);
+    // Spotlight-style category chip row: one clickable pill per filter, in the
+    // canonical cycle order. Targets/actions are wired up in `main` once the
+    // delegate exists; styling/positioning happens in `layout`.
+    let chips: Vec<Retained<NSButton>> = Filter::CYCLE
+        .iter()
+        .enumerate()
+        .map(|(i, f)| make_chip(mtm, i, f.label()))
+        .collect();
 
     // Critter image view, kept on top and hidden until it walks.
     let critter = NSImageView::initWithFrame(
@@ -1786,7 +1833,9 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     effect.addSubview(&search);
     effect.addSubview(&scroll);
     effect.addSubview(&separator);
-    effect.addSubview(&chip);
+    for chip in &chips {
+        effect.addSubview(chip);
+    }
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
     panel.setContentView(Some(&effect));
@@ -1797,7 +1846,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
         table,
         scroll,
         separator,
-        chip,
+        chips,
         critter,
         critter_label,
     }
@@ -1955,7 +2004,7 @@ fn main() {
         table,
         scroll,
         separator,
-        chip,
+        chips,
         critter,
         critter_label,
     } = views;
@@ -2043,7 +2092,7 @@ fn main() {
         generation: Cell::new(0),
         query_tx,
         active_filter: Cell::new(Filter::All),
-        chip,
+        chips,
         pending: pending.clone(),
         clip_history: history.clone(),
         keep_images: config.clipboard.keep_images,
@@ -2085,6 +2134,14 @@ fn main() {
         let _: () = msg_send![&*ivars.search, setDelegate: obj];
         let _: () = msg_send![&*ivars.table, setDataSource: obj];
         let _: () = msg_send![&*ivars.table, setDelegate: obj];
+    }
+
+    // Route category-chip clicks to the delegate's `chipClicked:` handler.
+    for chip in &ivars.chips {
+        unsafe {
+            chip.setTarget(Some(obj));
+            chip.setAction(Some(sel!(chipClicked:)));
+        }
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

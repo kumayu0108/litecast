@@ -20,7 +20,7 @@ so it stays fast and lean.
 - Recents on open - an empty query shows this session's recent activity and last AI answer (in-memory, never persisted).
 - Fuzzy app launcher.
 - File search (backed by the macOS Spotlight index via `mdfind`).
-- Category filters - scope results with an `@` prefix or a Tab-cycled chip.
+- Category filters - scope results by clicking a chip, typing an `@` prefix, or cycling with Tab.
 - Frecency ranking - frequently and recently used items drift to the top.
 - Inline calculator (hand-rolled evaluator).
 - Unit & currency conversion (`10 km in mi`, `100 usd to eur`).
@@ -104,14 +104,18 @@ provider's key. Then ask with `? your question`.
 
 ### Filters
 
-Scope results to one category, either by typing a prefix or cycling a chip:
+Scope results to one category. Three ways, all driving the same state:
 
-- Prefixes: `@apps`, `@files`, `@clip`, `@calc`, `@web`, `@cmd`, `@emoji`, `@ai`
+- **Click a chip:** a Spotlight-style row of category chips
+  (`All  Apps  Files  Clipboard  Calc  Web  Commands  Emoji  AI`) sits under the
+  search bar. Click one to activate that filter; the active chip is highlighted.
+- **Prefixes:** `@apps`, `@files`, `@clip`, `@calc`, `@web`, `@cmd`, `@emoji`, `@ai`
   (e.g. `@apps safari`, `@calc 100 usd to eur`).
-- Press `Tab` to cycle the filter forward (`All -> Apps -> ... -> AI -> All`) and
-  `Shift+Tab` to cycle back. The active filter shows as a pill near the search box.
+- **Tab:** press `Tab` to move the highlight forward along the chip row
+  (`All -> Apps -> ... -> AI -> All`) and `Shift+Tab` to move back.
 
-Both share one state. `Esc` clears an active filter first, then closes the panel.
+Clicking, typing a prefix, and Tab-cycling stay in sync. `Esc` clears an active
+filter first, then closes the panel.
 
 Arrow keys move the selection, `Enter` activates, `Esc` dismisses.
 

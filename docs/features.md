@@ -6,21 +6,25 @@ these to an existing config is backward compatible.
 
 ## Search filters (scope results to a category)
 
-Scope results to a single category two interchangeable ways:
+Scope results to a single category three interchangeable ways:
 
+- **Clickable chips (Spotlight-style):** a horizontal row of category chips
+  (`All  Apps  Files  Clipboard  Calc  Web  Commands  Emoji  AI`) sits in its own
+  band directly under the search field. Click a chip to activate that filter; the
+  active chip is highlighted as an accent pill, the rest are subtle but clearly
+  interactive. Clicking re-runs the query and returns focus to the search field.
 - **Typed prefix:** start the query with an `@token` followed by a space:
   `@apps safari`, `@files report`, `@calc 10 km in mi`, `@web rust`,
   `@cmd lock`, `@emoji fire`, `@ai explain x`. `@clip` (and any token alone)
   scopes with an empty query.
-- **Tab chip:** press **Tab** to cycle the filter forward
+- **Tab cycle:** press **Tab** to move the highlight forward along the chip row
   (`All -> Apps -> Files -> Clipboard -> Calc -> Web -> Commands -> Emoji -> AI -> All`)
-  and **Shift+Tab** to cycle backward. A chip in the search area always shows the
-  state: a faint "⇥ Filter" hint when unfiltered, or the active category as an
-  accent pill.
+  and **Shift+Tab** to move backward.
 
-Both drive the same active filter. **Esc** exits AI chat first (if active), then
-clears an active filter, then closes the panel. Tokens and the categories they
-map to:
+All three drive the same active filter and stay in sync: clicking a chip, typing
+a prefix, and Tab-cycling each update the highlighted chip and re-run the query.
+**Esc** exits AI chat first (if active), then clears an active filter, then
+closes the panel. Tokens and the categories they map to:
 
 | Token | Category | Includes (source labels) |
 | --- | --- | --- |
