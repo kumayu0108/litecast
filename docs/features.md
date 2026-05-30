@@ -44,6 +44,22 @@ commands) receive a bounded ranking boost so they drift to the top. The boost is
 capped so it never overrides intentful results like calculations or keyword
 hits. No configuration required.
 
+## Recents on open (session-only)
+
+Open the panel with an empty query and litecast shows what you did recently this
+session instead of a blank box:
+
+- Up to 12 recently activated items (apps launched, commands run, conversions
+  and web searches copied, emoji, etc.), tagged **Recent**. Selecting one
+  re-runs the same action.
+- The **last AI interaction** is pinned on top as a `Last AI: …` row whose
+  subtitle previews the answer. Selecting it reopens that answer and re-enters
+  the follow-up chat thread, so you can keep asking.
+
+This list is in-memory only — it is never written to disk and resets when
+litecast quits. It appears only in the normal launcher (not in screenshot mode
+or while an AI chat is active). Start typing to return to live results.
+
 ## Calculator
 
 Type any arithmetic expression (must contain an operator): `12 * (3 + 4)`,

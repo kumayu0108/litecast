@@ -17,6 +17,7 @@ so it stays fast and lean.
 ## Features
 
 - Global hotkey to toggle the search panel.
+- Recents on open - an empty query shows this session's recent activity and last AI answer (in-memory, never persisted).
 - Fuzzy app launcher.
 - File search (backed by the macOS Spotlight index via `mdfind`).
 - Category filters - scope results with an `@` prefix or a Tab-cycled chip.
@@ -45,6 +46,7 @@ so it stays fast and lean.
 
 Open the panel and start typing:
 
+- Open the panel and leave the query empty to see recent items and your last AI answer; pick one to re-run or reopen it.
 - Type an app or file name to launch/open it.
 - Type a math expression (e.g. `12 * (3 + 4)`) for an instant result.
 - Convert units or currency: `10 km in mi`, `100 f to c`, `100 usd to eur`.
