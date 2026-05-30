@@ -81,6 +81,10 @@ const ROW_H: f64 = 48.0;
 const MAX_VISIBLE_ROWS: usize = 8;
 const ROW_ICON: f64 = 26.0;
 const CORNER_RADIUS: f64 = 18.0;
+// Vertical breathing room around the results list (bottom-left origin), so rows
+// are never flush against the window edge / rounded corners.
+const RESULTS_TOP_GAP: f64 = 6.0;
+const RESULTS_BOTTOM_PAD: f64 = 10.0;
 // Fraction of the screen height where the panel's top edge sits.
 const TOP_FRACTION: f64 = 0.80;
 // Built-in critters used when the user has supplied no GIFs.
@@ -894,7 +898,16 @@ impl AppDelegate {
         let ivars = self.ivars();
         let visible_rows = rows.min(MAX_VISIBLE_ROWS);
         let results_h = visible_rows as f64 * ROW_H;
-        let total_h = SEARCH_AREA_H + results_h;
+        // The results block adds symmetric breathing room: a small gap under the
+        // separator and bottom padding so the last row clears the rounded corner.
+        let results_block = if visible_rows > 0 {
+            RESULTS_BOTTOM_PAD + results_h + RESULTS_TOP_GAP
+        } else {
+            0.0
+        };
+        let total_h = SEARCH_AREA_H + results_block;
+        // Top of the results block / bottom of the search area.
+        let band_bottom = results_block;
 
         let mtm = self.mtm();
         let (x, top) = if let Some(screen) = NSScreen::mainScreen(mtm) {
@@ -921,17 +934,19 @@ impl AppDelegate {
         let filter = ivars.active_filter.get();
         let chip = &ivars.chip;
         let (label, text_color, bg_color) = if filter == Filter::All {
+            // Idle: a clearly-enabled (not greyed) affordance hinting the Tab key.
             (
                 "\u{21e5} Filter".to_string(),
-                NSColor::tertiaryLabelColor(),
-                NSColor::labelColor().colorWithAlphaComponent(0.06),
+                NSColor::secondaryLabelColor(),
+                NSColor::labelColor().colorWithAlphaComponent(0.10),
             )
         } else {
+            // Active: a high-contrast accent pill with readable text.
             let accent = NSColor::controlAccentColor();
             (
                 format!("\u{21e5} {}", filter.label()),
-                accent.clone(),
-                accent.colorWithAlphaComponent(0.18),
+                NSColor::alternateSelectedControlTextColor(),
+                accent.colorWithAlphaComponent(0.95),
             )
         };
         chip.setStringValue(&NSString::from_str(&label));
@@ -939,10 +954,10 @@ impl AppDelegate {
         chip.setBackgroundColor(Some(&bg_color));
         chip.sizeToFit();
         let natural_w = chip.frame().size.width;
-        let chip_h = (line_height(12.0, true) + 6.0).round();
-        let chip_w = (natural_w + 18.0).round();
+        let chip_h = (line_height(12.0, true) + 8.0).round();
+        let chip_w = (natural_w + 22.0).round();
         let chip_x = PANEL_WIDTH - 22.0 - chip_w;
-        let chip_y = (results_h + (SEARCH_AREA_H - chip_h) / 2.0).round();
+        let chip_y = (band_bottom + (SEARCH_AREA_H - chip_h) / 2.0).round();
         chip.setFrame(NSRect::new(
             NSPoint::new(chip_x, chip_y),
             NSSize::new(chip_w, chip_h),
@@ -954,7 +969,7 @@ impl AppDelegate {
         // search area, so the text sits on the vertical midline (a tall field
         // would top-align its text instead).
         let search_h = line_height(24.0, false);
-        let search_y = (results_h + (SEARCH_AREA_H - search_h) / 2.0).round();
+        let search_y = (band_bottom + (SEARCH_AREA_H - search_h) / 2.0).round();
         let search_frame = NSRect::new(
             NSPoint::new(22.0, search_y),
             NSSize::new((search_right - 22.0).max(40.0), search_h),
@@ -963,15 +978,16 @@ impl AppDelegate {
 
         // Hairline separator on the boundary between the search area and results.
         let separator_frame = NSRect::new(
-            NSPoint::new(18.0, results_h),
+            NSPoint::new(18.0, band_bottom),
             NSSize::new(PANEL_WIDTH - 36.0, 1.0),
         );
         ivars.separator.setFrame(separator_frame);
         ivars.separator.setHidden(visible_rows == 0);
 
-        // Results scroll view fills the area below the search field.
+        // Results scroll view, inset above the bottom padding so the last row
+        // is fully visible and clears the rounded corners.
         let scroll_frame = NSRect::new(
-            NSPoint::new(0.0, 0.0),
+            NSPoint::new(0.0, RESULTS_BOTTOM_PAD),
             NSSize::new(PANEL_WIDTH, results_h),
         );
         ivars.scroll.setFrame(scroll_frame);
@@ -1252,6 +1268,9 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     table.addTableColumn(&column);
     table.setHeaderView(None);
     table.setRowHeight(ROW_H);
+    // No inter-row spacing: each row is exactly ROW_H, so visible_rows * ROW_H
+    // fits the scroll view exactly with no row clipped at the bottom.
+    table.setIntercellSpacing(NSSize::new(0.0, 0.0));
 
     let scroll = NSScrollView::initWithFrame(
         NSScrollView::alloc(mtm),
