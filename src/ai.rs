@@ -3,9 +3,44 @@ use serde_json::{json, Value};
 use crate::config::AiConfig;
 use crate::secrets;
 
-/// Ask the configured AI backend a question, optionally about an image (a PNG
-/// file path). Runs on a background thread; uses blocking HTTP via ureq.
-pub fn ask(config: &AiConfig, prompt: &str, image_path: Option<&str>) -> Result<String, String> {
+/// One turn in a conversation.
+#[derive(Clone, Debug)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// A single conversation message. `content` is plain text; images are attached
+/// separately to the final user turn (see `ask_chat`).
+#[derive(Clone, Debug)]
+pub struct ChatMsg {
+    pub role: Role,
+    pub content: String,
+}
+
+impl ChatMsg {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+        }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+        }
+    }
+}
+
+/// Ask the configured AI backend, threading the full conversation `history`
+/// (oldest first; the last entry is the newest user turn). An optional image is
+/// attached to the final user turn. Runs on a background thread; blocking ureq.
+pub fn ask_chat(
+    config: &AiConfig,
+    history: &[ChatMsg],
+    image_path: Option<&str>,
+) -> Result<String, String> {
     let key = secrets::get_api_key(&config.provider)
         .ok_or_else(|| format!("No API key set for {}", config.provider))?;
 
@@ -18,13 +53,17 @@ pub fn ask(config: &AiConfig, prompt: &str, image_path: Option<&str>) -> Result<
         None => None,
     };
 
+    if history.is_empty() {
+        return Err("No prompt to send".to_string());
+    }
+
     match config.provider.as_str() {
-        "anthropic" => ask_anthropic(config, &key, prompt, image_b64.as_deref()),
+        "anthropic" => ask_anthropic(config, &key, history, image_b64.as_deref()),
         // "cursor" kept as a legacy alias for the OpenAI-compatible path.
         "openai" | "openai-compatible" | "cursor" => {
-            ask_openai(config, &key, prompt, image_b64.as_deref())
+            ask_openai(config, &key, history, image_b64.as_deref())
         }
-        "gemini" | "google" => ask_gemini(config, &key, prompt, image_b64.as_deref()),
+        "gemini" | "google" => ask_gemini(config, &key, history, image_b64.as_deref()),
         other => Err(format!("Unknown AI provider: {other}")),
     }
 }
@@ -32,20 +71,34 @@ pub fn ask(config: &AiConfig, prompt: &str, image_path: Option<&str>) -> Result<
 fn ask_anthropic(
     config: &AiConfig,
     key: &str,
-    prompt: &str,
+    history: &[ChatMsg],
     image_b64: Option<&str>,
 ) -> Result<String, String> {
-    let mut content = vec![json!({"type": "text", "text": prompt})];
-    if let Some(b64) = image_b64 {
-        content.push(json!({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": b64}
-        }));
-    }
+    let last = history.len() - 1;
+    let messages: Vec<Value> = history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let mut content = vec![json!({"type": "text", "text": m.content})];
+            if i == last {
+                if let Some(b64) = image_b64 {
+                    content.push(json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": b64}
+                    }));
+                }
+            }
+            json!({"role": role, "content": content})
+        })
+        .collect();
     let body = json!({
         "model": config.model,
         "max_tokens": 1024,
-        "messages": [{"role": "user", "content": content}],
+        "messages": messages,
     });
 
     let mut resp = ureq::post("https://api.anthropic.com/v1/messages")
@@ -68,7 +121,7 @@ fn ask_anthropic(
 fn ask_openai(
     config: &AiConfig,
     key: &str,
-    prompt: &str,
+    history: &[ChatMsg],
     image_b64: Option<&str>,
 ) -> Result<String, String> {
     let base = if config.endpoint.is_empty() {
@@ -78,16 +131,30 @@ fn ask_openai(
     };
     let url = format!("{base}/v1/chat/completions");
 
-    let mut content = vec![json!({"type": "text", "text": prompt})];
-    if let Some(b64) = image_b64 {
-        content.push(json!({
-            "type": "image_url",
-            "image_url": {"url": format!("data:image/png;base64,{b64}")}
-        }));
-    }
+    let last = history.len() - 1;
+    let messages: Vec<Value> = history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let mut content = vec![json!({"type": "text", "text": m.content})];
+            if i == last {
+                if let Some(b64) = image_b64 {
+                    content.push(json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:image/png;base64,{b64}")}
+                    }));
+                }
+            }
+            json!({"role": role, "content": content})
+        })
+        .collect();
     let body = json!({
         "model": config.model,
-        "messages": [{"role": "user", "content": content}],
+        "messages": messages,
     });
 
     let mut resp = ureq::post(&url)
@@ -113,7 +180,7 @@ const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-flash";
 fn ask_gemini(
     config: &AiConfig,
     key: &str,
-    prompt: &str,
+    history: &[ChatMsg],
     image_b64: Option<&str>,
 ) -> Result<String, String> {
     let base = if config.endpoint.is_empty() {
@@ -128,14 +195,29 @@ fn ask_gemini(
     };
     let url = format!("{base}/v1beta/models/{model}:generateContent");
 
-    let mut parts = vec![json!({"text": prompt})];
-    if let Some(b64) = image_b64 {
-        parts.push(json!({
-            "inline_data": {"mime_type": "image/png", "data": b64}
-        }));
-    }
+    let last = history.len() - 1;
+    let contents: Vec<Value> = history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            // Gemini uses "model" (not "assistant") for the AI role.
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "model",
+            };
+            let mut parts = vec![json!({"text": m.content})];
+            if i == last {
+                if let Some(b64) = image_b64 {
+                    parts.push(json!({
+                        "inline_data": {"mime_type": "image/png", "data": b64}
+                    }));
+                }
+            }
+            json!({"role": role, "parts": parts})
+        })
+        .collect();
     let body = json!({
-        "contents": [{"parts": parts}],
+        "contents": contents,
     });
 
     // Send the key in a header (not the URL query) so it never lands in logs.

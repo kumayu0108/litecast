@@ -13,6 +13,9 @@ pub enum Action {
     /// Send a prompt (optionally about a screenshot) to the AI backend. Handled
     /// specially by the UI (async, keeps the panel open), not via `execute`.
     AskAi { prompt: String, image: Option<String> },
+    /// Continue the current AI conversation with `prompt`, threading prior turns.
+    /// Handled specially by the UI (async, keeps the panel open).
+    AskAiFollowup { prompt: String },
     /// Store an API key for a backend in the Keychain.
     SetApiKey { provider: String, key: String },
     /// Two-step confirmation wrapper for destructive actions (empty trash,
@@ -105,6 +108,7 @@ impl Action {
             // Handled by the UI (async); execution here is a no-op that keeps
             // the panel open.
             Action::AskAi { .. } => false,
+            Action::AskAiFollowup { .. } => false,
             // Handled by the UI's two-step confirm flow; never executed directly.
             Action::Confirm { .. } => false,
             Action::None => false,

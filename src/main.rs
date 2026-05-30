@@ -34,6 +34,7 @@ use objc2_foundation::{
     NSString, NSTimer,
 };
 
+use ai::ChatMsg;
 use clipboard::History;
 use config::{AiConfig, Config};
 use currency::CurrencyCache;
@@ -41,9 +42,9 @@ use engine::{Engine, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
-    AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
-    EasterEggProvider, EmojiProvider, FilesProvider, PluginProvider, QuicklinksProvider,
-    SnippetsProvider, SystemProvider, WebSearchProvider,
+    AiCommandsProvider, AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider,
+    ConvertProvider, EasterEggProvider, EmojiProvider, FilesProvider, PluginProvider,
+    QuicklinksProvider, SnippetsProvider, SystemProvider, WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -53,6 +54,7 @@ const PANEL_WIDTH: f64 = 720.0;
 const SEARCH_AREA_H: f64 = 66.0;
 const PLACEHOLDER_NORMAL: &str = "Search litecast...";
 const PLACEHOLDER_SHOT: &str = "Ask about the screenshot, then press Enter...";
+const PLACEHOLDER_FOLLOWUP: &str = "Follow up, or press Esc to exit chat...";
 const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "What are we launching today?",
     "Type to search, dream to launch...",
@@ -166,6 +168,12 @@ struct Ivars {
     ai_pending: AiPending,
     /// Monotonic AI request id; stale answers are discarded.
     ai_generation: Cell<u64>,
+    /// Running conversation transcript for multi-turn follow-up chat. Reset when
+    /// the panel is dismissed or a fresh top-level `?` question is asked.
+    chat: RefCell<Vec<ChatMsg>>,
+    /// Whether we are in follow-up chat mode (an answer is on screen and more
+    /// typing continues the thread).
+    chat_active: Cell<bool>,
     /// Active screenshot path while in "ask about screenshot" mode.
     screenshot_path: RefCell<Option<String>>,
     /// Captured screenshot path awaiting the main thread.
@@ -341,8 +349,11 @@ define_class!(
                 self.cycle_filter(false);
                 true
             } else if selector == sel!(cancelOperation:) {
-                // Esc clears an active filter first; only then closes the panel.
-                if self.ivars().active_filter.get() != Filter::All {
+                // Esc escalates: exit chat, then clear an active filter, then close.
+                let ivars = self.ivars();
+                if ivars.chat_active.get() {
+                    self.exit_chat();
+                } else if ivars.active_filter.get() != Filter::All {
                     self.set_filter(Filter::All);
                 } else {
                     self.hide_and_reset();
@@ -400,6 +411,22 @@ impl AppDelegate {
         ivars.active_filter.set(filter);
         self.layout(ivars.results.borrow().len());
         self.dispatch_query();
+    }
+
+    /// Leave follow-up chat mode and return to normal search (panel stays open).
+    fn exit_chat(&self) {
+        let ivars = self.ivars();
+        ivars.chat_active.set(false);
+        ivars.chat.borrow_mut().clear();
+        // Invalidate any in-flight answer so it can't re-enter chat mode.
+        ivars.ai_generation.set(ivars.ai_generation.get().wrapping_add(1));
+        ivars.search.setStringValue(&NSString::from_str(""));
+        ivars
+            .search
+            .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
+        ivars.results.borrow_mut().clear();
+        ivars.table.reloadData();
+        self.layout(0);
     }
 
     fn show(&self) {
@@ -471,8 +498,11 @@ impl AppDelegate {
         ivars.visible.set(false);
         ivars.pending_confirm.set(-1);
         ivars.active_filter.set(Filter::All);
-        // Bump the generation so any in-flight worker results are discarded.
+        ivars.chat_active.set(false);
+        ivars.chat.borrow_mut().clear();
+        // Bump the generations so any in-flight worker/AI results are discarded.
         ivars.generation.set(ivars.generation.get().wrapping_add(1));
+        ivars.ai_generation.set(ivars.ai_generation.get().wrapping_add(1));
         // Clear state for the next invocation.
         ivars.search.setStringValue(&NSString::from_str(""));
         ivars.screenshot_path.borrow_mut().take();
@@ -486,6 +516,14 @@ impl AppDelegate {
     fn dispatch_query(&self) {
         let ivars = self.ivars();
         ivars.pending_confirm.set(-1);
+
+        // Follow-up chat mode: while a conversation is open, typing composes the
+        // next turn (Enter sends it) instead of running the normal providers.
+        if ivars.chat_active.get() && ivars.screenshot_path.borrow().is_none() {
+            self.render_chat();
+            return;
+        }
+
         let raw = ivars.search.stringValue().to_string();
         // A typed `@token ` prefix sets the same sticky filter the chip uses,
         // and the remainder becomes the actual query.
@@ -604,6 +642,10 @@ impl AppDelegate {
             self.start_ai(prompt, image);
             return;
         }
+        if let Action::AskAiFollowup { prompt } = action {
+            self.start_ai_followup(prompt);
+            return;
+        }
 
         // Two-step confirmation for destructive actions: the first Enter arms
         // the row, the second (on the same row) runs the wrapped action.
@@ -636,11 +678,30 @@ impl AppDelegate {
         }
     }
 
-    /// Kick off an AI request on a background thread and show a loading state.
+    /// Start a fresh AI conversation with `prompt` (optionally about an image),
+    /// resetting any prior transcript.
     fn start_ai(&self, prompt: String, image: Option<String>) {
+        let ivars = self.ivars();
+        ivars.chat.borrow_mut().clear();
+        ivars.chat.borrow_mut().push(ChatMsg::user(prompt));
+        self.send_ai_turn(image);
+    }
+
+    /// Continue the current conversation with a follow-up `prompt`.
+    fn start_ai_followup(&self, prompt: String) {
+        let ivars = self.ivars();
+        ivars.chat.borrow_mut().push(ChatMsg::user(prompt));
+        self.send_ai_turn(None);
+    }
+
+    /// Send the current transcript to the backend on a worker thread, showing a
+    /// loading row. The reply is appended to the transcript by the main thread.
+    fn send_ai_turn(&self, image: Option<String>) {
         let ivars = self.ivars();
         // Leaving screenshot mode now that the question has been sent.
         ivars.screenshot_path.borrow_mut().take();
+        // Clear the field so the next keystroke composes a clean follow-up.
+        ivars.search.setStringValue(&NSString::from_str(""));
         ivars
             .search
             .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_NORMAL)));
@@ -660,9 +721,10 @@ impl AppDelegate {
 
         let config = ivars.ai_config.clone();
         let pending = ivars.ai_pending.clone();
+        let history = ivars.chat.borrow().clone();
         let delegate_addr = self as *const AppDelegate as usize;
         std::thread::spawn(move || {
-            let result = ai::ask(&config, &prompt, image.as_deref());
+            let result = ai::ask_chat(&config, &history, image.as_deref());
             if let Ok(mut slot) = pending.lock() {
                 *slot = Some((generation, result));
             }
@@ -679,6 +741,49 @@ impl AppDelegate {
         });
     }
 
+    /// Render the conversation while in follow-up chat mode: a compose row (when
+    /// the user has typed something) on top, followed by the latest answer.
+    fn render_chat(&self) {
+        let ivars = self.ivars();
+        let typed = ivars.search.stringValue().to_string();
+        let typed = typed.trim().to_string();
+
+        let mut items: Vec<Item> = Vec::new();
+        if !typed.is_empty() {
+            items.push(Item::new(
+                format!("Ask follow-up: {typed}"),
+                "Press Enter to continue the conversation (Esc to exit chat)",
+                "AI",
+                0,
+                Action::AskAiFollowup { prompt: typed },
+            ));
+        }
+        // Show the most recent answer underneath for context.
+        if let Some(answer) = ivars
+            .chat
+            .borrow()
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, ai::Role::Assistant))
+        {
+            items.extend(answer_to_items(&answer.content));
+        }
+        if items.is_empty() {
+            items.push(Item::new(
+                "Type a follow-up, then Enter",
+                "Esc to exit chat",
+                "AI",
+                0,
+                Action::None,
+            ));
+        }
+        let n = items.len();
+        *ivars.results.borrow_mut() = items;
+        ivars.table.reloadData();
+        self.layout(n);
+        self.select_row(0);
+    }
+
     fn apply_pending_ai_answer(&self) {
         let ivars = self.ivars();
         let taken = ivars.ai_pending.lock().ok().and_then(|mut slot| slot.take());
@@ -689,19 +794,30 @@ impl AppDelegate {
             return; // Stale answer.
         }
         let items = match result {
-            Ok(answer) => answer_to_items(&answer),
-            Err(err) => vec![Item::new(
-                "AI error",
-                err,
-                "AI",
-                0,
-                Action::None,
-            )],
+            Ok(answer) => {
+                // Remember the reply and enter follow-up chat mode so the next
+                // keystroke composes another turn.
+                ivars.chat.borrow_mut().push(ChatMsg::assistant(&answer));
+                ivars.chat_active.set(true);
+                ivars
+                    .search
+                    .setPlaceholderString(Some(&NSString::from_str(PLACEHOLDER_FOLLOWUP)));
+                answer_to_items(&answer)
+            }
+            Err(err) => {
+                // Drop the failed turn so the transcript stays valid; leave chat.
+                ivars.chat.borrow_mut().clear();
+                ivars.chat_active.set(false);
+                vec![Item::new("AI error", err, "AI", 0, Action::None)]
+            }
         };
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
         self.layout(n);
+        if n > 0 {
+            self.select_row(0);
+        }
     }
 
     /// Send a critter walking from the left edge to the right edge. Uses an
@@ -1171,6 +1287,10 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     // EasterEgg is general fun: only shown when no filter is active.
     engine.add(Box::new(EasterEggProvider), Filter::All);
     engine.add(Box::new(AiProvider::new(config.ai.clone())), Filter::Ai);
+    engine.add(
+        Box::new(AiCommandsProvider::new(&config.ai, history.clone())),
+        Filter::Ai,
+    );
     engine.add(Box::new(CalcProvider), Filter::Calc);
     let currency = CurrencyCache::new(config.conversion.currency_ttl_hours);
     // Warm the rate cache in the background so the first currency query is fast.
@@ -1282,6 +1402,8 @@ fn main() {
         ai_config: config.ai.clone(),
         ai_pending: Arc::new(Mutex::new(None)),
         ai_generation: Cell::new(0),
+        chat: RefCell::new(Vec::new()),
+        chat_active: Cell::new(false),
         screenshot_path: RefCell::new(None),
         shot_pending: Arc::new(Mutex::new(None)),
         playful_placeholders: config.ui.playful_placeholders,

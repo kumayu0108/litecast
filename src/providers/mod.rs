@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ai_commands;
 pub mod apps;
 pub mod calc;
 pub mod clipboard;
@@ -15,6 +16,7 @@ pub mod system;
 pub mod websearch;
 
 pub use ai::AiProvider;
+pub use ai_commands::AiCommandsProvider;
 pub use apps::AppsProvider;
 pub use calc::CalcProvider;
 pub use clipboard::ClipboardProvider;
