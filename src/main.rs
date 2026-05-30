@@ -43,9 +43,10 @@ use engine::{Engine, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
 use providers::{
-    AiCommandsProvider, AiProvider, AppsProvider, CalcProvider, ClipboardProvider, CommandsProvider,
-    ConvertProvider, EasterEggProvider, EmojiProvider, FilesProvider, PluginProvider,
-    QuicklinksProvider, SnippetsProvider, SystemProvider, WebSearchProvider,
+    AiCommandsProvider, AiProvider, AppsProvider, BookmarksProvider, CalcProvider,
+    ClipboardProvider, CommandsProvider, ConvertProvider, EasterEggProvider, EmojiProvider,
+    FilesProvider, PluginProvider, QuicklinksProvider, SnippetsProvider, SystemProvider,
+    WebSearchProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -1089,6 +1090,8 @@ fn row_icon(item: &Item) -> Option<Retained<NSImage>> {
         "Calc" => "function",
         "AI" => "sparkles",
         "Web" => "globe",
+        "Bookmark" => "bookmark",
+        "History" => "clock",
         "Clip" => "doc.on.clipboard",
         "Command" => "terminal",
         "Plugin" => "puzzlepiece.extension",
@@ -1352,6 +1355,7 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
     engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
     engine.add(Box::new(AppsProvider::new()), Filter::Apps);
     engine.add(Box::new(FilesProvider::new()), Filter::Files);
+    engine.add(Box::new(BookmarksProvider::new()), Filter::Web);
     engine.add(
         Box::new(WebSearchProvider::new(config.web_search_url.clone())),
         Filter::Web,
