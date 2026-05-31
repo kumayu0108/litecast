@@ -143,6 +143,10 @@ const SIDE_INSET: f64 = 22.0;
 // are never flush against the window edge / rounded corners.
 const RESULTS_TOP_GAP: f64 = 0.0;
 const RESULTS_BOTTOM_PAD: f64 = 10.0;
+/// Extra space below the last table row inside the scroll document so the
+/// rounded selection pill clears the NSClipView bottom edge (scroll height ==
+/// row sum alone leaves row 0 flush with the clip and clips bottom corners).
+const RESULTS_SCROLL_BOTTOM_INSET: f64 = 8.0;
 // Fraction of the screen height where the panel's top edge sits.
 const TOP_FRACTION: f64 = 0.80;
 // Built-in critters used when the user has supplied no GIFs.
@@ -1522,7 +1526,7 @@ impl AppDelegate {
         // The results block adds symmetric breathing room: a small gap under the
         // separator and bottom padding so the last row clears the rounded corner.
         let results_block = if has_rows {
-            RESULTS_BOTTOM_PAD + results_h + RESULTS_TOP_GAP
+            RESULTS_BOTTOM_PAD + results_h + RESULTS_TOP_GAP + RESULTS_SCROLL_BOTTOM_INSET
         } else {
             0.0
         };
@@ -1608,10 +1612,12 @@ impl AppDelegate {
         ivars.separator.setHidden(!has_rows);
 
         // Results scroll view, inset above the bottom padding so the last row
-        // is fully visible and clears the rounded corners.
+        // is fully visible and clears the rounded corners. The scroll band is
+        // slightly taller than the row sum so the document has dead space below
+        // the last row and selection pills are not clipped by the clip view.
         let scroll_frame = NSRect::new(
             NSPoint::new(0.0, RESULTS_BOTTOM_PAD),
-            NSSize::new(PANEL_WIDTH, results_h),
+            NSSize::new(PANEL_WIDTH, results_h + RESULTS_SCROLL_BOTTOM_INSET),
         );
         ivars.scroll.setFrame(scroll_frame);
         ivars.scroll.setHidden(!has_rows);
@@ -1995,14 +2001,15 @@ fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
     unsafe {
         let _: () = msg_send![&*scroll, setAutomaticallyAdjustsContentInsets: false];
         let _: () = msg_send![&*clip, setAutomaticallyAdjustsContentInsets: false];
-        let zero = NSEdgeInsets {
+        let insets = NSEdgeInsets {
             top: 0.0,
             left: 0.0,
-            bottom: 0.0,
+            bottom: RESULTS_SCROLL_BOTTOM_INSET,
             right: 0.0,
         };
-        let _: () = msg_send![&*scroll, setContentInsets: zero];
-        let _: () = msg_send![&*scroll, setScrollerInsets: zero];
+        let _: () = msg_send![&*scroll, setContentInsets: insets];
+        let _: () = msg_send![&*scroll, setScrollerInsets: insets];
+        let _: () = msg_send![&*clip, setContentInsets: insets];
     }
 }
 
@@ -2011,7 +2018,7 @@ fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
 fn sync_results_table_geometry(scroll: &NSScrollView, table: &NSTableView, table_h: f64) {
     table.setFrame(NSRect::new(
         NSPoint::new(0.0, 0.0),
-        NSSize::new(PANEL_WIDTH, table_h),
+        NSSize::new(PANEL_WIDTH, table_h + RESULTS_SCROLL_BOTTOM_INSET),
     ));
     let clip = scroll.contentView();
     unsafe {
@@ -2468,8 +2475,9 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
     table.setHeaderView(Some(&header));
     table.setRowHeight(ROW_H);
-    // No inter-row spacing: each row is exactly ROW_H, so visible_rows * ROW_H
-    // fits the scroll view exactly with no row clipped at the bottom.
+    // No inter-row spacing: each row is exactly ROW_H; scroll band adds
+    // RESULTS_SCROLL_BOTTOM_INSET below the last row so selection pills clear
+    // the clip view bottom edge.
     table.setIntercellSpacing(NSSize::new(0.0, 0.0));
 
     let scroll = NSScrollView::initWithFrame(
