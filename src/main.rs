@@ -139,7 +139,7 @@ const CORNER_RADIUS: f64 = 20.0;
 const SIDE_INSET: f64 = 22.0;
 // Vertical breathing room around the results list (bottom-left origin), so rows
 // are never flush against the window edge / rounded corners.
-const RESULTS_TOP_GAP: f64 = 6.0;
+const RESULTS_TOP_GAP: f64 = 2.0;
 const RESULTS_BOTTOM_PAD: f64 = 10.0;
 // Fraction of the screen height where the panel's top edge sits.
 const TOP_FRACTION: f64 = 0.80;
@@ -225,9 +225,11 @@ define_class!(
 // Horizontal/vertical inset of the rounded selection highlight within a row.
 const SELECTION_INSET_X: f64 = 15.0;
 const SELECTION_INSET_Y: f64 = 7.0;
-/// Extra inset so icons/text/tags sit clearly inside the selection pill.
+/// Extra inset so icons/text sit clearly inside the selection pill.
 const ROW_CONTENT_INSET: f64 = 5.0;
 const ROW_CONTENT_LEFT: f64 = SELECTION_INSET_X + ROW_CONTENT_INSET;
+/// Right-side source tags sit this far in from the selection pill's right edge.
+const ROW_TAG_PILL_INSET: f64 = 10.0;
 // Gap between the row icon and the title/subtitle text, and between the text and
 // the right-side source tag.
 const ROW_TEXT_GAP: f64 = 14.0;
@@ -1976,21 +1978,23 @@ fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
     clip.setDrawsBackground(false);
     table.setUsesAlternatingRowBackgroundColors(false);
     table.setBackgroundColor(&NSColor::clearColor());
-    table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
+    // Regular keeps row views in the selected state so LcRowView::draw_selection
+    // runs; None suppresses that callback entirely.
+    table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::Regular);
 }
 
 /// Restyle a category chip for the current active state: an accent pill when
 /// active, a subtle (but clearly interactive) fill otherwise.
 fn accent_selection_fill() -> Retained<NSColor> {
-    NSColor::labelColor().colorWithAlphaComponent(0.12)
+    NSColor::labelColor().colorWithAlphaComponent(0.20)
 }
 
 fn accent_chip_active_fill() -> Retained<NSColor> {
-    NSColor::labelColor().colorWithAlphaComponent(0.16)
+    NSColor::labelColor().colorWithAlphaComponent(0.24)
 }
 
 fn accent_chip_idle_fill() -> Retained<NSColor> {
-    NSColor::labelColor().colorWithAlphaComponent(0.08)
+    NSColor::labelColor().colorWithAlphaComponent(0.07)
 }
 
 /// Screen for panel placement: cursor screen, then prev-app screen, then main.
@@ -2252,9 +2256,10 @@ fn make_row_cell(
     let title_center = title_y + title_h / 2.0;
 
     // Optional right-aligned source tag (e.g. "App", "File"), vertically aligned
-    // to the title center and inset symmetrically with the icon so it sits
-    // comfortably INSIDE the rounded selection highlight (never flush/clipped).
-    let mut right_edge = width - ROW_CONTENT_LEFT;
+    // to the title center and inset from the selection pill's right edge (not the
+    // raw panel edge) so tags stay balanced inside the highlight pill.
+    let tag_right = width - SELECTION_INSET_X - ROW_TAG_PILL_INSET;
+    let mut right_edge = tag_right;
     if let Some(tag_text) = source_tag(item.source) {
         let tag = make_label(
             mtm,
@@ -2266,7 +2271,7 @@ fn make_row_cell(
         tag.sizeToFit();
         let tag_w = tag.frame().size.width.ceil();
         let tag_h = line_height(11.0, false);
-        let tag_x = (width - ROW_CONTENT_LEFT - tag_w).round();
+        let tag_x = (tag_right - tag_w).round();
         let tag_y = (title_center - tag_h / 2.0).round();
         tag.setFrame(NSRect::new(NSPoint::new(tag_x, tag_y), NSSize::new(tag_w, tag_h)));
         container.addSubview(&tag);
