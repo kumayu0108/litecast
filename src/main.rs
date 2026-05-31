@@ -69,7 +69,7 @@ type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 720.0;
-const SEARCH_AREA_H: f64 = 72.0;
+const SEARCH_AREA_H: f64 = 48.0;
 // Spotlight-style rounded "pill" search field: a soft capsule with a leading
 // magnifier glyph and generous padding around the typed text.
 const SEARCH_PILL_H: f64 = 48.0;
@@ -2297,11 +2297,10 @@ fn make_row_cell(
         let bottom = ((ROW_H - block) / 2.0).round();
         (bottom + sub_h + GAP, Some((bottom, sub_h)))
     };
-    let title_center = title_y + title_h / 2.0;
 
-    // Optional right-aligned source tag (e.g. "App", "File"), vertically aligned
-    // to the title center and inset from the selection pill's right edge (not the
-    // raw panel edge) so tags stay balanced inside the highlight pill.
+    // Optional right-aligned source tag (e.g. "App", "File"), vertically centered
+    // in the full row and inset from the selection pill's right edge (not the raw
+    // panel edge) so tags stay balanced inside the highlight pill.
     // tag_right = pill_right - ROW_TAG_PILL_INSET, tag_x = tag_right - tag_w.
     let pill_right = width - SELECTION_INSET_X;
     let tag_right = pill_right - ROW_TAG_PILL_INSET;
@@ -2318,7 +2317,7 @@ fn make_row_cell(
         let tag_w = tag.frame().size.width.ceil() + ROW_TAG_WIDTH_SLOP;
         let tag_h = line_height(11.0, false);
         let tag_x = tag_right - tag_w;
-        let tag_y = (title_center - tag_h / 2.0).round();
+        let tag_y = ((ROW_H - tag_h) / 2.0).round();
         tag.setFrame(NSRect::new(NSPoint::new(tag_x, tag_y), NSSize::new(tag_w, tag_h)));
         container.addSubview(&tag);
         right_edge = tag_x - ROW_TEXT_GAP;
