@@ -261,6 +261,21 @@ If you ever want to reset the decision, open **Keychain Access**, find the
 `litecast` item, and remove litecast from its **Access Control** list (or delete
 the item to re-enter the key with `setkey`).
 
+## Troubleshooting
+
+### `IMKCFRunLoopWakeUpReliable` in the terminal
+
+When the search field becomes first responder, macOS may print:
+
+```text
+error messaging the mach port for IMKCFRunLoopWakeUpReliable
+```
+
+This comes from **Input Method Kit** (system text-input infrastructure), not from
+litecast logic. It is a known, harmless log line on many AppKit text fields and
+does not indicate a functional problem. litecast uses a plain `NSTextField` and
+avoids redundant `makeFirstResponder` calls where possible.
+
 ## License
 
 Licensed under the MIT License. See the [LICENSE](LICENSE) file for the full text.

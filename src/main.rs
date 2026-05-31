@@ -34,8 +34,8 @@ use objc2_app_kit::{
     NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
     NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableRowView, NSTableView,
-    NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSPasteboardTypeTIFF,     NSScreen, NSScrollView, NSTableColumn, NSTableRowView, NSTableView,
+    NSTableViewSelectionHighlightStyle, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSBaselineOffsetAttributeName, NSFontAttributeName, NSForegroundColorAttributeName,
     NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     NSWorkspace,
@@ -154,6 +154,11 @@ define_class!(
     struct LcPanel;
 
     impl LcPanel {
+        #[unsafe(method(isOpaque))]
+        fn is_opaque(&self) -> bool {
+            false
+        }
+
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
             true
@@ -635,7 +640,7 @@ define_class!(
             if let Some(filter) = Filter::CYCLE.get(idx).copied() {
                 self.set_filter(filter);
                 let ivars = self.ivars();
-                ivars.panel.makeFirstResponder(Some(&ivars.search));
+                focus_search_field(&ivars.panel, &ivars.search);
             }
         }
 
@@ -650,7 +655,7 @@ define_class!(
             }
             if let Some(filter) = Filter::CYCLE.get(index as usize).copied() {
                 self.set_filter(filter);
-                ivars.panel.makeFirstResponder(Some(&ivars.search));
+                focus_search_field(&ivars.panel, &ivars.search);
             }
         }
     }
@@ -736,7 +741,7 @@ impl AppDelegate {
         app.activateIgnoringOtherApps(true);
 
         ivars.panel.makeKeyAndOrderFront(None);
-        ivars.panel.makeFirstResponder(Some(&ivars.search));
+        focus_search_field(&ivars.panel, &ivars.search);
         ivars.visible.set(true);
         // Select the entire existing query so typing replaces it (Spotlight-style),
         // while arrow keys still navigate results without clearing it.
@@ -1933,14 +1938,55 @@ fn make_chip(mtm: MainThreadMarker, idx: usize, label: &str) -> Retained<NSButto
     button
 }
 
+/// Rounded-rect clip for the panel root / vibrancy view so borderless window
+/// corners stay transparent (no default white backing in the square frame).
+fn apply_rounded_clip(view: &NSView, radius: f64) {
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        unsafe {
+            let _: () = msg_send![&*layer, setCornerRadius: radius];
+            let _: () = msg_send![&*layer, setMasksToBounds: true];
+        }
+    }
+}
+
+/// Focus the search field without redundant `makeFirstResponder` calls (reduces
+/// Input Method Kit console noise such as `IMKCFRunLoopWakeUpReliable`).
+fn focus_search_field(panel: &LcPanel, search: &NSTextField) {
+    if let Some(fr) = panel.firstResponder() {
+        let search_obj: &AnyObject = search;
+        if fr.isEqual(Some(search_obj)) {
+            return;
+        }
+        if let Some(editor) = search.currentEditor() {
+            let editor_obj: &AnyObject = &*editor;
+            if fr.isEqual(Some(editor_obj)) {
+                return;
+            }
+        }
+    }
+    panel.makeFirstResponder(Some(search));
+}
+
+/// Make the results table/scroll views visually transparent so the vibrancy
+/// background reads as one continuous surface with the header/chip band.
+fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
+    scroll.setDrawsBackground(false);
+    let clip = scroll.contentView();
+    clip.setDrawsBackground(false);
+    table.setUsesAlternatingRowBackgroundColors(false);
+    table.setBackgroundColor(&NSColor::clearColor());
+    table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
+}
+
 /// Restyle a category chip for the current active state: an accent pill when
 /// active, a subtle (but clearly interactive) fill otherwise.
 fn accent_selection_fill() -> Retained<NSColor> {
-    NSColor::controlAccentColor().colorWithAlphaComponent(0.18)
+    NSColor::labelColor().colorWithAlphaComponent(0.12)
 }
 
 fn accent_chip_active_fill() -> Retained<NSColor> {
-    NSColor::controlAccentColor().colorWithAlphaComponent(0.90)
+    NSColor::labelColor().colorWithAlphaComponent(0.16)
 }
 
 fn accent_chip_idle_fill() -> Retained<NSColor> {
@@ -1981,10 +2027,7 @@ fn screen_containing_point(mtm: MainThreadMarker, point: NSPoint) -> Option<Reta
 
 fn style_chip(chip: &NSButton, label: &str, active: bool) {
     let (text_color, bg) = if active {
-        (
-            NSColor::alternateSelectedControlTextColor(),
-            accent_chip_active_fill(),
-        )
+        (NSColor::labelColor(), accent_chip_active_fill())
     } else {
         (
             NSColor::secondaryLabelColor(),
@@ -2297,23 +2340,20 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
             | NSWindowCollectionBehavior::Stationary,
     );
 
-    // Frosted translucent background with clipped rounded corners. Sidebar is a
-    // clean, system-adaptive material that reads well as a Spotlight-style panel.
+    // Root clips the square window frame to rounded corners; the vibrancy view
+    // fills it so header, chips, and results share one material surface.
+    let root = NSView::initWithFrame(NSView::alloc(mtm), content_rect);
+    apply_rounded_clip(&root, CORNER_RADIUS);
+
     let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content_rect);
     effect.setMaterial(NSVisualEffectMaterial::Menu);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
-    effect.setWantsLayer(true);
-    if let Some(layer) = effect.layer() {
-        unsafe {
-            let _: () = msg_send![&*layer, setCornerRadius: CORNER_RADIUS];
-            let _: () = msg_send![&*layer, setMasksToBounds: true];
-        }
-    }
     effect.setAutoresizingMask(
         objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
             | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
     );
+    root.addSubview(&effect);
 
     // Spotlight-style rounded pill background behind the search field. Sized and
     // positioned in `layout`; here we just establish its look (soft fill +
@@ -2351,7 +2391,9 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     search_icon.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
     search_icon.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
 
-    // Borderless, transparent, large text field for a native Spotlight feel.
+    // Borderless NSTextField (not NSSearchField) for a native Spotlight feel.
+    // macOS may log `IMKCFRunLoopWakeUpReliable` when the field becomes first
+    // responder; that is harmless Input Method Kit noise, not a litecast bug.
     let search_rect = NSRect::new(
         NSPoint::new(SIDE_INSET, 14.0),
         NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, 40.0),
@@ -2387,7 +2429,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
     scroll.setDocumentView(Some(&table));
     scroll.setHasVerticalScroller(true);
-    scroll.setDrawsBackground(false);
+    configure_results_views(&scroll, &table);
     // Overlay scrollers (style = 1) float over content instead of insetting it,
     // so rows keep the full panel width and the source tag stays inside the row.
     unsafe {
@@ -2444,7 +2486,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
-    panel.setContentView(Some(&effect));
+    panel.setContentView(Some(&root));
 
     PanelViews {
         panel,
