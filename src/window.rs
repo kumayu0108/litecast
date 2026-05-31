@@ -22,7 +22,7 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_graphics_types::geometry::{CGPoint, CGSize};
 use objc2_app_kit::NSScreen;
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSPoint};
 
 use crate::model::WindowOp;
 
@@ -353,4 +353,31 @@ fn compute_target(
         height: rect.h,
     };
     Ok((ax_pos, ax_size))
+}
+
+/// Center of the focused window of `pid` in Cocoa coordinates (bottom-left origin).
+pub fn window_center_cocoa(mtm: MainThreadMarker, pid: i32) -> Option<NSPoint> {
+    if pid <= 0 {
+        return None;
+    }
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let _app_guard = unsafe { CFType::wrap_under_create_rule(app as CFTypeRef) };
+    let win = copy_element(app, kAXFocusedWindowAttribute)?;
+    let _win_guard = unsafe { CFType::wrap_under_create_rule(win as CFTypeRef) };
+    let pos = copy_point(win, kAXPositionAttribute)?;
+    let size = copy_size(win, kAXSizeAttribute)?;
+    let scr = screens(mtm);
+    let primary_h = scr
+        .iter()
+        .find(|s| s.frame.x == 0.0 && s.frame.y == 0.0)
+        .map(|s| s.frame.h)
+        .unwrap_or_else(|| scr.first().map(|s| s.frame.h).unwrap_or(0.0));
+    let cocoa_y = primary_h - pos.y - size.height;
+    Some(NSPoint::new(
+        pos.x + size.width / 2.0,
+        cocoa_y + size.height / 2.0,
+    ))
 }

@@ -90,6 +90,8 @@ pub enum Action {
         directory: bool,
         reveal: bool,
         editor: bool,
+        /// Initial file contents (ignored for directories).
+        contents: Option<String>,
     },
     /// Pick a pixel color from anywhere on screen. Handled specially by the UI
     /// (main thread; uses `screencapture` then reads the pixel).
@@ -103,6 +105,8 @@ pub enum Action {
     /// Toggle the pinned state of a clipboard entry (identified by its key:
     /// text or image path). Handled by the UI so it can refresh the list.
     TogglePin { key: String },
+    /// Send SIGTERM to any process listening on `port` (argv-only `lsof` + `kill`).
+    KillPort(u16),
     /// Store an API key for a backend in the Keychain.
     SetApiKey { provider: String, key: String },
     /// Two-step confirmation wrapper for destructive actions (empty trash,
@@ -228,8 +232,9 @@ impl Action {
                 directory,
                 reveal,
                 editor,
+                contents,
             } => {
-                create_path(path, *directory, *reveal, *editor);
+                create_path(path, *directory, *reveal, *editor, contents.as_deref());
                 true
             }
             Action::Paste(template) => {
@@ -254,6 +259,10 @@ impl Action {
             Action::Window(_) => false,
             // Handled by the UI; never executed directly.
             Action::TogglePin { .. } => false,
+            Action::KillPort(port) => {
+                kill_port(*port);
+                true
+            }
             // Handled by the UI's two-step confirm flow; never executed directly.
             Action::Confirm { .. } => false,
             Action::None => false,
@@ -365,7 +374,7 @@ fn run_capture(program: String, args: Vec<String>, mode: CaptureMode, title: Str
 /// Create a file or folder, then optionally reveal it in Finder / open it in an
 /// editor. Pure Rust for the filesystem work (no shell), so the path is never
 /// interpreted as a command.
-fn create_path(path: &str, directory: bool, reveal: bool, editor: bool) {
+fn create_path(path: &str, directory: bool, reveal: bool, editor: bool, contents: Option<&str>) {
     use std::path::Path;
     let p = Path::new(path);
     if directory {
@@ -375,7 +384,10 @@ fn create_path(path: &str, directory: bool, reveal: bool, editor: bool) {
             let _ = std::fs::create_dir_all(parent);
         }
         if !p.exists() {
-            let _ = std::fs::write(p, "");
+            let body = contents.unwrap_or("");
+            let _ = std::fs::write(p, body);
+        } else if let Some(body) = contents {
+            let _ = std::fs::write(p, body);
         }
     }
     if editor {
@@ -403,6 +415,25 @@ fn create_path(path: &str, directory: bool, reveal: bool, editor: bool) {
 /// Append a `[YYYY-MM-DD HH:MM] <text>` line to a notes file, creating it if
 /// needed. Done in pure Rust (no shell) so the note body can never be
 /// interpreted as a command.
+/// Terminate processes listening on a TCP port (`lsof -ti` then `kill -TERM`).
+fn kill_port(port: u16) {
+    let output = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-ti", &format!("tcp:{port}")])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let pid = line.trim();
+        if pid.is_empty() {
+            continue;
+        }
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", pid])
+            .status();
+    }
+}
+
 fn append_note_line(path: &str, text: &str) {
     use std::io::Write;
     let stamp = std::process::Command::new("/bin/date")

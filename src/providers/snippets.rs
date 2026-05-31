@@ -71,11 +71,7 @@ fn display_name(snip: &SnippetConfig) -> String {
 }
 
 fn build_item(snip: &SnippetConfig, score: i64) -> Item {
-    let action = if snip.paste {
-        Action::Paste(snip.text.clone())
-    } else {
-        Action::CopyText(snip.text.clone())
-    };
+    let action = Action::Paste(snip.text.clone());
     let label = display_name(snip);
     let id = if !snip.keyword.is_empty() {
         snip.keyword.clone()

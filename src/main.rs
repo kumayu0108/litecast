@@ -1,15 +1,19 @@
 mod ai;
 mod clipboard;
+mod color_pick;
 mod config;
 mod critters;
 mod currency;
 mod engine;
 mod frecency;
+mod menu_ax;
+mod menu_cache;
 mod model;
 mod paths;
 mod providers;
 mod screenshot;
 mod secrets;
+mod target_pid;
 mod window;
 
 use std::cell::{Cell, RefCell};
@@ -53,8 +57,10 @@ use providers::{
     CalcProvider, CalendarProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
     ConvertersProvider, DateTimeProvider, DevToolsProvider, DictionaryProvider, EasterEggProvider,
     EmojiProvider, FileActionsProvider, FilesProvider, MediaProvider, NetworkProvider,
-    NotesProvider, PluginProvider, ProcessProvider, QuicklinksProvider, ScriptsProvider,
-    SnippetsProvider, SystemProvider, WebSearchProvider, WindowProvider,
+    ColorProvider, GitProvider, MenuProvider, NewFileProvider, NotesProvider, PluginProvider,
+    PomodoroProvider, ProcessProvider, ProgUtilsProvider, QuicklinksProvider, ScriptsProvider,
+    SnippetsProvider, SwitcherProvider, SystemProvider, TextTransformProvider, WebSearchProvider,
+    WindowProvider,
 };
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
@@ -100,7 +106,7 @@ const PLAYFUL_PLACEHOLDERS: &[&str] = &[
     "Keyboard warrior mode: engaged.",
     "Lighter than the rest, by design.",
 ];
-const ROW_H: f64 = 48.0;
+const ROW_H: f64 = 52.0;
 const MAX_VISIBLE_ROWS: usize = 8;
 // AI answer "card" rendering: the whole reply lives in one rounded container
 // with a wrapping text view, a leading sparkle accent, and a copy button. Sized
@@ -212,8 +218,11 @@ define_class!(
 );
 
 // Horizontal/vertical inset of the rounded selection highlight within a row.
-const SELECTION_INSET_X: f64 = 8.0;
-const SELECTION_INSET_Y: f64 = 4.0;
+const SELECTION_INSET_X: f64 = 15.0;
+const SELECTION_INSET_Y: f64 = 7.0;
+/// Extra inset so icons/text/tags sit clearly inside the selection pill.
+const ROW_CONTENT_INSET: f64 = 5.0;
+const ROW_CONTENT_LEFT: f64 = SELECTION_INSET_X + ROW_CONTENT_INSET;
 // Gap between the row icon and the title/subtitle text, and between the text and
 // the right-side source tag.
 const ROW_TEXT_GAP: f64 = 14.0;
@@ -246,7 +255,7 @@ define_class!(
                 ),
             );
             let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 9.0, 9.0);
-            let color = NSColor::controlAccentColor().colorWithAlphaComponent(0.20);
+            let color = accent_selection_fill();
             color.set();
             path.fill();
         }
@@ -351,6 +360,8 @@ struct Ivars {
     /// commands target this app's focused window (since opening the panel makes
     /// litecast itself frontmost). -1 when unknown.
     prev_app_pid: Cell<i32>,
+    menu_enabled: bool,
+    color_max_recent: usize,
     _hotkey_manager: GlobalHotKeyManager,
 }
 
@@ -381,6 +392,11 @@ define_class!(
             if self.ivars().visible.get() {
                 self.select_all_search();
             }
+        }
+
+        #[unsafe(method(windowDidChangeScreen:))]
+        fn window_did_change_screen(&self, _notification: &NSNotification) {
+            self.layout(self.ivars().results.borrow().len());
         }
     }
 
@@ -689,7 +705,11 @@ impl AppDelegate {
             let pid = front.processIdentifier();
             if pid > 0 && pid != std::process::id() as i32 {
                 ivars.prev_app_pid.set(pid);
+                target_pid::set(pid);
             }
+        }
+        if ivars.menu_enabled {
+            menu_cache::refresh(ivars.prev_app_pid.get(), 80);
         }
 
         self.layout(ivars.results.borrow().len());
@@ -1140,6 +1160,17 @@ impl AppDelegate {
             self.dispatch_query();
             return;
         }
+        if let Action::PickColor = action {
+            self.run_pick_color();
+            return;
+        }
+        if let Action::MenuPick { pid, path } = action {
+            if let Some(id) = &id {
+                ivars.frecency.record(id);
+            }
+            self.run_menu_pick(pid, &path);
+            return;
+        }
 
         // Two-step confirmation for destructive actions: the first Enter arms
         // the row, the second (on the same row) runs the wrapped action.
@@ -1195,6 +1226,38 @@ impl AppDelegate {
         match window::apply(self.mtm(), ivars.prev_app_pid.get(), op) {
             Ok(()) => self.hide_and_reset(),
             Err(msg) => self.show_status_row("Window command failed", &msg, Action::None),
+        }
+    }
+
+    fn run_pick_color(&self) {
+        let max = self.ivars().color_max_recent;
+        self.hide_and_reset();
+        match color_pick::pick_color_interactive() {
+            Ok(hex) => {
+                color_pick::push_recent(&hex, max);
+                clipboard::set_clipboard(&hex);
+                model::notify("Color picked", &color_pick::format_color_detail(&hex));
+            }
+            Err(msg) => model::notify("Color pick", &msg),
+        }
+    }
+
+    fn run_menu_pick(&self, pid: i32, path: &[String]) {
+        if !window::trusted(false) {
+            window::trusted(true);
+            self.show_status_row(
+                "Accessibility permission needed",
+                "Grant litecast access in System Settings, then try again",
+                Action::Open(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                        .to_string(),
+                ),
+            );
+            return;
+        }
+        match menu_ax::press_menu_path(pid, path) {
+            Ok(()) => self.hide_and_reset(),
+            Err(msg) => self.show_status_row("Menu command failed", &msg, Action::None),
         }
     }
 
@@ -1460,7 +1523,7 @@ impl AppDelegate {
         let band_bottom = results_block;
 
         let mtm = self.mtm();
-        let (x, top) = if let Some(screen) = NSScreen::mainScreen(mtm) {
+        let (x, top) = if let Some(screen) = screen_for_panel(mtm, ivars.prev_app_pid.get()) {
             let vf = screen.visibleFrame();
             (
                 vf.origin.x + (vf.size.width - PANEL_WIDTH) / 2.0,
@@ -1872,16 +1935,60 @@ fn make_chip(mtm: MainThreadMarker, idx: usize, label: &str) -> Retained<NSButto
 
 /// Restyle a category chip for the current active state: an accent pill when
 /// active, a subtle (but clearly interactive) fill otherwise.
+fn accent_selection_fill() -> Retained<NSColor> {
+    NSColor::controlAccentColor().colorWithAlphaComponent(0.18)
+}
+
+fn accent_chip_active_fill() -> Retained<NSColor> {
+    NSColor::controlAccentColor().colorWithAlphaComponent(0.90)
+}
+
+fn accent_chip_idle_fill() -> Retained<NSColor> {
+    NSColor::labelColor().colorWithAlphaComponent(0.08)
+}
+
+/// Screen for panel placement: cursor screen, then prev-app screen, then main.
+fn screen_for_panel(mtm: MainThreadMarker, prev_pid: i32) -> Option<Retained<NSScreen>> {
+    let point = NSEvent::mouseLocation();
+    if let Some(s) = screen_containing_point(mtm, point) {
+        return Some(s);
+    }
+    if prev_pid > 0 {
+        if let Some(point) = window::window_center_cocoa(mtm, prev_pid) {
+            if let Some(s) = screen_containing_point(mtm, point) {
+                return Some(s);
+            }
+        }
+    }
+    NSScreen::mainScreen(mtm)
+}
+
+fn screen_containing_point(mtm: MainThreadMarker, point: NSPoint) -> Option<Retained<NSScreen>> {
+    let screens = NSScreen::screens(mtm);
+    for i in 0..screens.count() {
+        let s = screens.objectAtIndex(i);
+        let f = s.frame();
+        if point.x >= f.origin.x
+            && point.x < f.origin.x + f.size.width
+            && point.y >= f.origin.y
+            && point.y < f.origin.y + f.size.height
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn style_chip(chip: &NSButton, label: &str, active: bool) {
     let (text_color, bg) = if active {
         (
             NSColor::alternateSelectedControlTextColor(),
-            NSColor::controlAccentColor().colorWithAlphaComponent(0.95),
+            accent_chip_active_fill(),
         )
     } else {
         (
             NSColor::secondaryLabelColor(),
-            NSColor::labelColor().colorWithAlphaComponent(0.08),
+            accent_chip_idle_fill(),
         )
     };
     chip.setBezelColor(Some(&bg));
@@ -2071,7 +2178,7 @@ fn make_row_cell(
     let icon_view = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
         NSRect::new(
-            NSPoint::new(SIDE_INSET, (ROW_H - ROW_ICON) / 2.0),
+            NSPoint::new(ROW_CONTENT_LEFT, (ROW_H - ROW_ICON) / 2.0),
             NSSize::new(ROW_ICON, ROW_ICON),
         ),
     );
@@ -2082,7 +2189,7 @@ fn make_row_cell(
     container.addSubview(&icon_view);
 
     // Title and subtitle share this fixed left edge (icon inset + icon + gap).
-    let text_x = SIDE_INSET + ROW_ICON + ROW_TEXT_GAP;
+    let text_x = ROW_CONTENT_LEFT + ROW_ICON + ROW_TEXT_GAP;
 
     // Compute the title/subtitle vertical layout up front so the right-side tag
     // can be aligned to the *title's* vertical center (cleaner on two-line rows
@@ -2104,19 +2211,19 @@ fn make_row_cell(
     // Optional right-aligned source tag (e.g. "App", "File"), vertically aligned
     // to the title center and inset symmetrically with the icon so it sits
     // comfortably INSIDE the rounded selection highlight (never flush/clipped).
-    let mut right_edge = width - SIDE_INSET;
+    let mut right_edge = width - ROW_CONTENT_LEFT;
     if let Some(tag_text) = source_tag(item.source) {
         let tag = make_label(
             mtm,
             tag_text,
             11.0,
             weight_regular(),
-            &NSColor::tertiaryLabelColor(),
+            &NSColor::secondaryLabelColor().colorWithAlphaComponent(0.55),
         );
         tag.sizeToFit();
         let tag_w = tag.frame().size.width.ceil();
         let tag_h = line_height(11.0, false);
-        let tag_x = (width - SIDE_INSET - tag_w).round();
+        let tag_x = (width - ROW_CONTENT_LEFT - tag_w).round();
         let tag_y = (title_center - tag_h / 2.0).round();
         tag.setFrame(NSRect::new(NSPoint::new(tag_x, tag_y), NSSize::new(tag_w, tag_h)));
         container.addSubview(&tag);
@@ -2505,6 +2612,18 @@ fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine
         Filter::Cmd,
     );
     engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
+    engine.add(Box::new(GitProvider::new(config.git.clone())), Filter::Cmd);
+    engine.add(Box::new(TextTransformProvider), Filter::Cmd);
+    engine.add(Box::new(ProgUtilsProvider), Filter::Cmd);
+    engine.add(Box::new(PomodoroProvider::new(config.pomodoro.clone())), Filter::Cmd);
+    engine.add(Box::new(NewFileProvider::new(config.newfile.clone())), Filter::Cmd);
+    engine.add(Box::new(ColorProvider::new(config.color.clone())), Filter::Calc);
+    if config.menu.enabled {
+        engine.add(Box::new(MenuProvider::new(config.menu.clone())), Filter::Cmd);
+    }
+    // Window/tab switcher: keyword-gated (`windows`/`switch`/`tabs`); listing is
+    // cached briefly and only runs osascript on a keyword match.
+    engine.add(Box::new(SwitcherProvider::new()), Filter::Cmd);
     // Window management is opt-in (needs Accessibility); only surface its
     // commands when explicitly enabled in the config.
     if config.window.enabled {
@@ -2683,6 +2802,8 @@ fn main() {
         suppress_ghost: Cell::new(false),
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
+        menu_enabled: config.menu.enabled,
+        color_max_recent: config.color.max_recent,
         _hotkey_manager: manager,
     };
 

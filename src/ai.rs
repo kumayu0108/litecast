@@ -41,9 +41,6 @@ pub fn ask_chat(
     history: &[ChatMsg],
     image_path: Option<&str>,
 ) -> Result<String, String> {
-    let key = secrets::get_api_key(&config.provider)
-        .ok_or_else(|| format!("No API key set for {}", config.provider))?;
-
     let image_b64 = match image_path {
         Some(path) => Some(
             std::fs::read(path)
@@ -57,15 +54,81 @@ pub fn ask_chat(
         return Err("No prompt to send".to_string());
     }
 
+    if image_b64.is_some() && config.provider == "ollama" {
+        return Err(
+            "Vision is not supported for the configured Ollama model. Use a vision-capable model or remove the screenshot."
+                .to_string(),
+        );
+    }
+
     match config.provider.as_str() {
-        "anthropic" => ask_anthropic(config, &key, history, image_b64.as_deref()),
-        // "cursor" kept as a legacy alias for the OpenAI-compatible path.
-        "openai" | "openai-compatible" | "cursor" => {
-            ask_openai(config, &key, history, image_b64.as_deref())
+        "anthropic" => {
+            let key = secrets::api_key_for_chat(&config.provider, &config.endpoint)
+                .ok_or_else(|| format!("No API key set for {}", config.provider))?;
+            ask_anthropic(config, &key, history, image_b64.as_deref())
         }
-        "gemini" | "google" => ask_gemini(config, &key, history, image_b64.as_deref()),
+        "openai" | "openai-compatible" | "cursor" => {
+            let key = secrets::api_key_for_chat(&config.provider, &config.endpoint)
+                .ok_or_else(|| format!("No API key set for {}", config.provider))?;
+            ask_openai(config, Some(key.as_str()), history, image_b64.as_deref())
+        }
+        "ollama" => ask_ollama(config, history),
+        "gemini" | "google" => {
+            let key = secrets::api_key_for_chat(&config.provider, &config.endpoint)
+                .ok_or_else(|| format!("No API key set for {}", config.provider))?;
+            ask_gemini(config, &key, history, image_b64.as_deref())
+        }
         other => Err(format!("Unknown AI provider: {other}")),
     }
+}
+
+/// List installed Ollama models from `GET /api/tags`.
+pub fn list_ollama_models(endpoint: &str) -> Result<Vec<String>, String> {
+    let base = ollama_base(endpoint);
+    let url = format!("{base}/api/tags");
+    let mut resp = ureq::get(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|e| format!("Could not reach Ollama at {base}: {e}"))?;
+    let value: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+    let models: Vec<String> = value
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        Err("No models installed. Run `ollama pull llama3.2` (or `ollama pull hf.co/...` for Hugging Face GGUF models)".to_string())
+    } else {
+        Ok(models)
+    }
+}
+
+fn ollama_base(endpoint: &str) -> String {
+    if endpoint.is_empty() {
+        "http://127.0.0.1:11434".to_string()
+    } else {
+        endpoint.trim_end_matches('/').to_string()
+    }
+}
+
+fn ask_ollama(config: &AiConfig, history: &[ChatMsg]) -> Result<String, String> {
+    let mut cfg = config.clone();
+    if cfg.model.is_empty() {
+        cfg.model = list_ollama_models(&cfg.endpoint)?
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "llama3.2".to_string());
+    }
+    if cfg.endpoint.is_empty() {
+        cfg.endpoint = ollama_base("");
+    }
+    ask_openai(&cfg, None, history, None)
 }
 
 fn ask_anthropic(
@@ -120,11 +183,13 @@ fn ask_anthropic(
 
 fn ask_openai(
     config: &AiConfig,
-    key: &str,
+    key: Option<&str>,
     history: &[ChatMsg],
     image_b64: Option<&str>,
 ) -> Result<String, String> {
-    let base = if config.endpoint.is_empty() {
+    let base = if config.provider == "ollama" {
+        ollama_base(&config.endpoint)
+    } else if config.endpoint.is_empty() {
         "https://api.openai.com".to_string()
     } else {
         config.endpoint.trim_end_matches('/').to_string()
@@ -157,11 +222,11 @@ fn ask_openai(
         "messages": messages,
     });
 
-    let mut resp = ureq::post(&url)
-        .header("authorization", format!("Bearer {key}"))
-        .header("content-type", "application/json")
-        .send_json(body)
-        .map_err(|e| e.to_string())?;
+    let mut req = ureq::post(&url).header("content-type", "application/json");
+    if let Some(key) = key.filter(|k| !k.is_empty()) {
+        req = req.header("authorization", format!("Bearer {key}"));
+    }
+    let mut resp = req.send_json(body).map_err(|e| e.to_string())?;
 
     let value: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
     value

@@ -111,13 +111,14 @@ web_search_url = "https://www.google.com/search?q={}"
 currency_ttl_hours = 12
 
 [ai]
-# Backend: "anthropic", "openai", "gemini", or "openai-compatible"
+# Backend: "anthropic", "openai", "gemini", "openai-compatible", or "ollama".
 # ("cursor" still works as a legacy alias for "openai-compatible").
+# Local Ollama needs no API key: provider = "ollama", endpoint = "http://127.0.0.1:11434".
+# Hugging Face GGUF models: `ollama pull hf.co/<user>/<model>`.
 # For Gemini, use e.g. model = "gemini-2.5-flash" (no endpoint needed).
-provider = "anthropic"
-model = "claude-3-5-sonnet-latest"
-# Optional base-URL override for "openai-compatible"/"gemini" proxies.
-endpoint = ""
+provider = "ollama"
+model = "llama3.2"
+endpoint = "http://127.0.0.1:11434"
 
 # Quick notes. Type "note <text>" to append a timestamped line to a plain-text
 # notes file; type "note" (or "notes") to open it. By default the file lives at
@@ -642,9 +643,9 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-3-5-sonnet-latest".to_string(),
-            endpoint: String::new(),
+            provider: "ollama".to_string(),
+            model: "llama3.2".to_string(),
+            endpoint: "http://127.0.0.1:11434".to_string(),
         }
     }
 }

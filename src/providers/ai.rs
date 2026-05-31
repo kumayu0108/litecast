@@ -1,3 +1,4 @@
+use crate::ai;
 use crate::config::AiConfig;
 use crate::engine::Provider;
 use crate::model::{Action, Item};
@@ -72,7 +73,9 @@ impl Provider for AiProvider {
 
         // Friendly first-run hint: no key configured but the user is trying to
         // ask. Point them at `setup` and offer to open the key page directly.
-        if secrets::get_api_key(provider).is_none() {
+        if secrets::needs_api_key(provider, &self.config.endpoint)
+            && secrets::get_api_key(provider).is_none()
+        {
             out.push(Item::new(
                 format!("Set up {} first - no API key yet", friendly_name(provider)),
                 "Type `setup` for a guided walkthrough, or Enter to open the key page".to_string(),
@@ -105,12 +108,23 @@ impl AiProvider {
     fn push_setup_guide(&self, out: &mut Vec<Item>) {
         let provider = &self.config.provider;
         let name = friendly_name(provider);
+        let needs_key = secrets::needs_api_key(provider, &self.config.endpoint);
         let has_key = secrets::get_api_key(provider).is_some();
 
-        let status = if has_key {
+        let status = if provider == "ollama" {
+            match ai::list_ollama_models(&self.config.endpoint) {
+                Ok(models) => format!(
+                    "Ollama is running. Installed models: {}. No API key needed.",
+                    models.join(", ")
+                ),
+                Err(e) => format!("Ollama: {e}"),
+            }
+        } else if has_key {
             format!("A key is already saved for {name}. Run `setkey <new-key>` to replace it.")
-        } else {
+        } else if needs_key {
             format!("No key saved yet for {name}.")
+        } else {
+            format!("{name} uses endpoint {} (no Keychain key required).", self.config.endpoint)
         };
         out.push(Item::new(
             format!("AI setup - active provider: {name}"),
@@ -120,7 +134,22 @@ impl AiProvider {
             Action::None,
         ));
 
-        if let Some(url) = key_page(provider) {
+        if provider == "ollama" {
+            out.push(Item::new(
+                "1. Install & start Ollama",
+                "Download from ollama.com, then run `ollama serve`",
+                "AI",
+                11_040,
+                Action::Open("https://ollama.com".to_string()),
+            ));
+            out.push(Item::new(
+                "2. Pull a model",
+                "Example: `ollama pull llama3.2` or `ollama pull hf.co/<user>/<model>` for Hugging Face",
+                "AI",
+                11_035,
+                Action::None,
+            ));
+        } else if let Some(url) = key_page(provider) {
             out.push(Item::new(
                 format!("1. Get a {name} API key"),
                 format!("Press Enter to open {url}"),
@@ -129,13 +158,15 @@ impl AiProvider {
                 Action::Open(url.to_string()),
             ));
         }
-        out.push(Item::new(
-            "2. Store it in litecast",
-            "Type `setkey <your-api-key>` then Enter - saved to the macOS Keychain",
-            "AI",
-            11_030,
-            Action::None,
-        ));
+        if needs_key {
+            out.push(Item::new(
+                "Store API key in litecast",
+                "Type `setkey <your-api-key>` then Enter - saved to the macOS Keychain",
+                "AI",
+                11_030,
+                Action::None,
+            ));
+        }
         out.push(Item::new(
             "3. Ask away",
             "Type `? your question` and press Enter (Esc exits chat)",
@@ -159,6 +190,7 @@ fn friendly_name(provider: &str) -> &str {
         "anthropic" => "Anthropic Claude",
         "openai" => "OpenAI",
         "gemini" | "google" => "Google Gemini",
+        "ollama" => "Ollama (local)",
         "openai-compatible" | "cursor" => "your OpenAI-compatible endpoint",
         other => other,
     }

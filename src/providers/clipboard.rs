@@ -35,6 +35,37 @@ impl Provider for ClipboardProvider {
         let mut ordered: Vec<ClipEntry> = snap.iter().filter(|e| e.pinned).cloned().collect();
         ordered.extend(snap.iter().filter(|e| !e.pinned).cloned());
 
+        // `clip paste` / `clip paste plain` — paste the latest text entry as plain text.
+        if rest.eq_ignore_ascii_case("paste") || rest.eq_ignore_ascii_case("paste plain") {
+            if let Some(entry) = ordered.iter().find(|e| e.kind == ClipKind::Text) {
+                let plain = entry.text.clone();
+                out.push(Item::new(
+                    "Paste plain text",
+                    preview(&plain),
+                    "Clip",
+                    12_000,
+                    paste_plain_action(&plain),
+                ));
+            } else {
+                out.push(Item::new(
+                    "Nothing to paste",
+                    "Copy some text first",
+                    "Clip",
+                    12_000,
+                    Action::None,
+                ));
+            }
+            return;
+        }
+
+        // `clip stack` — show numbered stack for quick re-copy.
+        if rest.eq_ignore_ascii_case("stack") {
+            for (i, entry) in ordered.iter().take(8).enumerate() {
+                out.push(make_item(entry, i + 1, 11_000 - i as i64));
+            }
+            return;
+        }
+
         // `clip pin <n>` / `clip unpin <n>`: toggle the nth listed entry.
         let mut toks = rest.split_whitespace();
         if let Some(first) = toks.next() {
@@ -101,7 +132,7 @@ fn make_item(entry: &ClipEntry, n: usize, score: i64) -> Item {
             let path = entry.path.clone().unwrap_or_default();
             let item = Item::new(
                 title,
-                format!("#{n} - Image - Enter to copy"),
+                format!("#{n} - Image preview - Enter to copy PNG"),
                 "Clip",
                 score,
                 copy_image_action(&path),
@@ -125,6 +156,12 @@ fn make_item(entry: &ClipEntry, n: usize, score: i64) -> Item {
 /// Shell-free action that puts a stored PNG back on the clipboard as image
 /// data. The file path is passed as an `on run argv` parameter, so it is never
 /// interpreted as AppleScript source (even though it is an app-generated path).
+/// Paste clipboard text without formatting (argv-safe AppleScript).
+fn paste_plain_action(text: &str) -> Action {
+    let script = "on run argv\nset the clipboard to (item 1 of argv)\ntell application \"System Events\" to keystroke \"v\" using command down\nend run";
+    osascript_action_with_args(script, &[text])
+}
+
 fn copy_image_action(path: &str) -> Action {
     let script = "on run argv\nset the clipboard to (read (POSIX file (item 1 of argv)) as «class PNGf»)\nend run";
     osascript_action_with_args(script, &[path])
