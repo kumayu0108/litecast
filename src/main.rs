@@ -34,15 +34,17 @@ use objc2_app_kit::{
     NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
     NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF,     NSScreen, NSScrollView, NSTableColumn, NSTableRowView, NSTableView,
+    NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableHeaderView,
+    NSTableRowView, NSTableView,
     NSTableViewSelectionHighlightStyle, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSBaselineOffsetAttributeName, NSFontAttributeName, NSForegroundColorAttributeName,
     NSVisualEffectView, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
     NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSIndexSet, NSNotification,
-    NSNumber, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSTimer,
+    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSEdgeInsets, NSIndexSet,
+    NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSTimer,
 };
 
 use ai::ChatMsg;
@@ -139,7 +141,7 @@ const CORNER_RADIUS: f64 = 20.0;
 const SIDE_INSET: f64 = 22.0;
 // Vertical breathing room around the results list (bottom-left origin), so rows
 // are never flush against the window edge / rounded corners.
-const RESULTS_TOP_GAP: f64 = 2.0;
+const RESULTS_TOP_GAP: f64 = 0.0;
 const RESULTS_BOTTOM_PAD: f64 = 10.0;
 // Fraction of the screen height where the panel's top edge sits.
 const TOP_FRACTION: f64 = 0.80;
@@ -224,12 +226,14 @@ define_class!(
 
 // Horizontal/vertical inset of the rounded selection highlight within a row.
 const SELECTION_INSET_X: f64 = 15.0;
-const SELECTION_INSET_Y: f64 = 7.0;
+const SELECTION_INSET_Y: f64 = 4.0;
 /// Extra inset so icons/text sit clearly inside the selection pill.
 const ROW_CONTENT_INSET: f64 = 5.0;
 const ROW_CONTENT_LEFT: f64 = SELECTION_INSET_X + ROW_CONTENT_INSET;
 /// Right-side source tags sit this far in from the selection pill's right edge.
-const ROW_TAG_PILL_INSET: f64 = 10.0;
+const ROW_TAG_PILL_INSET: f64 = 14.0;
+/// Extra width slop so `sizeToFit` underestimates don't push tags past the pill edge.
+const ROW_TAG_WIDTH_SLOP: f64 = 2.0;
 // Gap between the row icon and the title/subtitle text, and between the text and
 // the right-side source tag.
 const ROW_TEXT_GAP: f64 = 14.0;
@@ -1611,6 +1615,10 @@ impl AppDelegate {
         );
         ivars.scroll.setFrame(scroll_frame);
         ivars.scroll.setHidden(!has_rows);
+        if has_rows {
+            let total_table_h: f64 = ivars.results.borrow().iter().map(row_height_for).sum();
+            sync_results_table_geometry(&ivars.scroll, &ivars.table, total_table_h);
+        }
     }
 }
 
@@ -1974,6 +1982,7 @@ fn focus_search_field(panel: &LcPanel, search: &NSTextField) {
 /// background reads as one continuous surface with the header/chip band.
 fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
     scroll.setDrawsBackground(false);
+    scroll.setHasVerticalScroller(true);
     let clip = scroll.contentView();
     clip.setDrawsBackground(false);
     table.setUsesAlternatingRowBackgroundColors(false);
@@ -1981,6 +1990,34 @@ fn configure_results_views(scroll: &NSScrollView, table: &NSTableView) {
     // Regular keeps row views in the selected state so LcRowView::draw_selection
     // runs; None suppresses that callback entirely.
     table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::Regular);
+    // `setHeaderView(None)` still reserves ~24pt on some macOS versions; a
+    // zero-height header removes that phantom gap above row 0.
+    unsafe {
+        let _: () = msg_send![&*scroll, setAutomaticallyAdjustsContentInsets: false];
+        let _: () = msg_send![&*clip, setAutomaticallyAdjustsContentInsets: false];
+        let zero = NSEdgeInsets {
+            top: 0.0,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+        };
+        let _: () = msg_send![&*scroll, setContentInsets: zero];
+        let _: () = msg_send![&*scroll, setScrollerInsets: zero];
+    }
+}
+
+/// Pin the table document to the top-left of the scroll clip so row 0 sits flush
+/// under the separator with no phantom header offset.
+fn sync_results_table_geometry(scroll: &NSScrollView, table: &NSTableView, table_h: f64) {
+    table.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(PANEL_WIDTH, table_h),
+    ));
+    let clip = scroll.contentView();
+    unsafe {
+        let _: () = msg_send![&*clip, scrollToPoint: NSPoint::new(0.0, 0.0)];
+        scroll.reflectScrolledClipView(&clip);
+    }
 }
 
 /// Restyle a category chip for the current active state: an accent pill when
@@ -2258,7 +2295,9 @@ fn make_row_cell(
     // Optional right-aligned source tag (e.g. "App", "File"), vertically aligned
     // to the title center and inset from the selection pill's right edge (not the
     // raw panel edge) so tags stay balanced inside the highlight pill.
-    let tag_right = width - SELECTION_INSET_X - ROW_TAG_PILL_INSET;
+    // tag_right = pill_right - ROW_TAG_PILL_INSET, tag_x = tag_right - tag_w.
+    let pill_right = width - SELECTION_INSET_X;
+    let tag_right = pill_right - ROW_TAG_PILL_INSET;
     let mut right_edge = tag_right;
     if let Some(tag_text) = source_tag(item.source) {
         let tag = make_label(
@@ -2269,9 +2308,9 @@ fn make_row_cell(
             &NSColor::secondaryLabelColor().colorWithAlphaComponent(0.55),
         );
         tag.sizeToFit();
-        let tag_w = tag.frame().size.width.ceil();
+        let tag_w = tag.frame().size.width.ceil() + ROW_TAG_WIDTH_SLOP;
         let tag_h = line_height(11.0, false);
-        let tag_x = (tag_right - tag_w).round();
+        let tag_x = tag_right - tag_w;
         let tag_y = (title_center - tag_h / 2.0).round();
         tag.setFrame(NSRect::new(NSPoint::new(tag_x, tag_y), NSSize::new(tag_w, tag_h)));
         container.addSubview(&tag);
@@ -2422,7 +2461,12 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
         NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &NSString::from_str("main"));
     column.setWidth(PANEL_WIDTH);
     table.addTableColumn(&column);
-    table.setHeaderView(None);
+    // Zero-height header: `None` still leaves a phantom band above row 0 on macOS.
+    let header = NSTableHeaderView::initWithFrame(
+        NSTableHeaderView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(PANEL_WIDTH, 0.0)),
+    );
+    table.setHeaderView(Some(&header));
     table.setRowHeight(ROW_H);
     // No inter-row spacing: each row is exactly ROW_H, so visible_rows * ROW_H
     // fits the scroll view exactly with no row clipped at the bottom.

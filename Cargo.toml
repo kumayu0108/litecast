@@ -62,6 +62,7 @@ features = [
     "NSVisualEffectView",
     "NSTableView",
     "NSTableColumn",
+    "NSTableHeaderView",
     "NSScrollView",
     "NSColor",
     "NSFont",
