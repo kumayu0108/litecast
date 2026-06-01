@@ -309,7 +309,9 @@ struct Ivars {
     /// Whether the full panel chrome (shell, chips, results band) is visible.
     panel_expanded: Cell<bool>,
     /// Rounded "pill" background behind the search field (Spotlight-style).
-    search_bg: Retained<NSView>,
+    /// A frosted vibrancy view so the field reads as a solid floating box even
+    /// when the panel is collapsed (no see-through to the desktop).
+    search_bg: Retained<NSVisualEffectView>,
     /// Leading magnifier glyph inside the search pill.
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
@@ -740,6 +742,34 @@ impl AppDelegate {
             ivars.table.reloadData();
         }
         self.layout(ivars.results.borrow().len(), animated);
+        // Expanding moves the search pill from the collapsed (centered) band to
+        // the top band, which reframes the NSTextField. If the field is being
+        // edited, reframing leaves its field editor stranded at the old frame so
+        // the character that triggered the expand isn't drawn until the next
+        // keystroke. Re-attach the field editor at the new frame, preserving the
+        // typed text and caret, so the first character renders immediately.
+        if want {
+            self.resync_field_editor();
+        }
+    }
+
+    /// Re-attach the search field's field editor at the field's current frame
+    /// without losing the typed text or caret position. Used after a relayout
+    /// that moves the field while it is being edited (collapsed -> expanded).
+    fn resync_field_editor(&self) {
+        let ivars = self.ivars();
+        let Some(editor) = ivars.search.currentEditor() else {
+            return;
+        };
+        let sel: NSRange = unsafe { msg_send![&*editor, selectedRange] };
+        // Re-making first responder ends/begins editing, which repositions the
+        // field editor to the field's new frame.
+        ivars.panel.makeFirstResponder(Some(&*ivars.search));
+        if let Some(editor) = ivars.search.currentEditor() {
+            unsafe {
+                let _: () = msg_send![&*editor, setSelectedRange: sel];
+            }
+        }
     }
 
     /// Expand the panel chrome immediately (chat, AI, status rows).
@@ -2467,7 +2497,7 @@ struct PanelViews {
     panel: Retained<LcPanel>,
     panel_shell: Retained<NSVisualEffectView>,
     search: Retained<NSTextField>,
-    search_bg: Retained<NSView>,
+    search_bg: Retained<NSVisualEffectView>,
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
@@ -2521,23 +2551,26 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
     root.addSubview(&effect);
 
-    // Spotlight-style rounded pill background behind the search field. Sized and
-    // positioned in `layout`; here we just establish its look (soft fill +
-    // hairline border, fully rounded ends).
-    let search_bg = NSView::initWithFrame(
-        NSView::alloc(mtm),
+    // Spotlight-style rounded pill background behind the search field. This is a
+    // frosted vibrancy view (not a faint translucent fill) so the pill reads as
+    // a solid floating search box rather than see-through to the desktop. It is
+    // always visible — both collapsed and expanded — sized/positioned in
+    // `layout`. Corner radius + masking give it fully rounded ends, plus a
+    // hairline border.
+    let search_bg = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, SEARCH_PILL_H)),
     );
+    search_bg.setMaterial(NSVisualEffectMaterial::Menu);
+    search_bg.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    search_bg.setState(NSVisualEffectState::Active);
     search_bg.setWantsLayer(true);
     if let Some(layer) = search_bg.layer() {
-        let fill = NSColor::labelColor().colorWithAlphaComponent(0.07);
         let border = NSColor::labelColor().colorWithAlphaComponent(0.10);
         unsafe {
-            let fill_cg: *mut AnyObject = msg_send![&*fill, CGColor];
             let border_cg: *mut AnyObject = msg_send![&*border, CGColor];
             let _: () = msg_send![&*layer, setCornerRadius: SEARCH_PILL_H / 2.0];
             let _: () = msg_send![&*layer, setMasksToBounds: true];
-            let _: () = msg_send![&*layer, setBackgroundColor: fill_cg];
             let _: () = msg_send![&*layer, setBorderWidth: 1.0_f64];
             let _: () = msg_send![&*layer, setBorderColor: border_cg];
         }
