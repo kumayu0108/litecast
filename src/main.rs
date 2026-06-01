@@ -2933,6 +2933,19 @@ fn main() {
 
     // Load critter GIFs (if any) only when the feature is enabled.
     let config = config::load();
+
+    // Warm the API-key PRESENCE cache off the main/worker threads. The first
+    // Keychain read for a provider can block for several seconds (cold ACL /
+    // unlock), which previously froze the first keystroke when the worker
+    // thread hit `has_api_key_cached` synchronously. Doing it here, detached at
+    // startup, means every per-keystroke lookup is a warm in-memory cache hit.
+    // Fire-and-forget: the result is ignored and startup does not block on it.
+    {
+        let provider = config.ai.provider.clone();
+        std::thread::spawn(move || {
+            let _ = secrets::has_api_key_cached(&provider);
+        });
+    }
     let critter_images: Vec<Retained<NSImage>> = if config.ui.critters {
         critters::discover()
             .into_iter()

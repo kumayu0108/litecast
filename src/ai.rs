@@ -68,9 +68,14 @@ pub fn ask_chat(
             ask_anthropic(config, &key, history, image_b64.as_deref())
         }
         "openai" | "openai-compatible" | "cursor" => {
-            let key = secrets::api_key_for_chat(&config.provider, &config.endpoint)
-                .ok_or_else(|| format!("No API key set for {}", config.provider))?;
-            ask_openai(config, Some(key.as_str()), history, image_b64.as_deref())
+            // A local endpoint (localhost / 127.0.0.1) needs no key, exactly as
+            // `secrets::needs_api_key` treats Ollama. Only error when a key is
+            // genuinely required but missing; otherwise proceed key-less.
+            let key = secrets::api_key_for_chat(&config.provider, &config.endpoint);
+            if key.is_none() && secrets::needs_api_key(&config.provider, &config.endpoint) {
+                return Err(format!("No API key set for {}", config.provider));
+            }
+            ask_openai(config, key.as_deref(), history, image_b64.as_deref())
         }
         "ollama" => ask_ollama(config, history),
         "gemini" | "google" => {

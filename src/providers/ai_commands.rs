@@ -83,7 +83,7 @@ impl AiCommandsProvider {
         };
 
         if secrets::needs_api_key(&self.provider, "")
-            && secrets::get_api_key(&self.provider).is_none()
+            && !secrets::has_api_key_cached(&self.provider)
         {
             out.push(Item::new(
                 format!("{} (no API key)", cmd.name),

@@ -74,7 +74,7 @@ impl Provider for AiProvider {
         // Friendly first-run hint: no key configured but the user is trying to
         // ask. Point them at `setup` and offer to open the key page directly.
         if secrets::needs_api_key(provider, &self.config.endpoint)
-            && secrets::get_api_key(provider).is_none()
+            && !secrets::has_api_key_cached(provider)
         {
             out.push(Item::new(
                 format!("Set up {} first - no API key yet", friendly_name(provider)),
