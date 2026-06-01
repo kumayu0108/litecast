@@ -69,10 +69,13 @@ type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
 
 const PANEL_WIDTH: f64 = 720.0;
-const SEARCH_AREA_H: f64 = 48.0;
 // Spotlight-style rounded "pill" search field: a soft capsule with a leading
 // magnifier glyph and generous padding around the typed text.
 const SEARCH_PILL_H: f64 = 48.0;
+// Asymmetric search band: breathing room above the pill, tight gap to chips.
+const SEARCH_TOP_PAD: f64 = 12.0;
+const SEARCH_TO_CHIP_GAP: f64 = 8.0;
+const SEARCH_AREA_H: f64 = SEARCH_TOP_PAD + SEARCH_PILL_H + SEARCH_TO_CHIP_GAP;
 const SEARCH_ICON: f64 = 19.0;
 // Point size of the typed query text.
 const SEARCH_FONT_SIZE: f64 = 22.0;
@@ -1573,13 +1576,13 @@ impl AppDelegate {
             chip_x += chip_w + CHIP_GAP;
         }
 
-        // Spotlight-style search pill, centered in the top search band (which
-        // sits above the chip row). The pill spans the shared side margins; the
-        // magnifier glyph and the text field are vertically centered inside it.
+        // Spotlight-style search pill in the top search band (above the chip row).
+        // Asymmetric vertical placement: top inset above the pill, small gap to
+        // chips — not vertically centered in SEARCH_AREA_H.
         let search_area_bottom = band_bottom + CHIP_ROW_H;
         let pill_x = SIDE_INSET;
         let pill_w = PANEL_WIDTH - 2.0 * SIDE_INSET;
-        let pill_y = (search_area_bottom + (SEARCH_AREA_H - SEARCH_PILL_H) / 2.0).round();
+        let pill_y = (search_area_bottom + SEARCH_TO_CHIP_GAP).round();
         ivars.search_bg.setFrame(NSRect::new(
             NSPoint::new(pill_x, pill_y),
             NSSize::new(pill_w, SEARCH_PILL_H),
