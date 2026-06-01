@@ -28,11 +28,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSBackingStoreType,
     NSAnimationContext, NSBezelStyle, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox,
     NSBoxType, NSButton, NSButtonType,
     NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
-    NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
+    NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSLayoutConstraint, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableHeaderView,
     NSTableRowView, NSTableView,
@@ -42,7 +43,7 @@ use objc2_app_kit::{
     NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSEdgeInsets, NSIndexSet,
+    MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSEdgeInsets, NSIndexSet,
     NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
     NSTimer,
 };
@@ -142,7 +143,7 @@ const MAX_RESULTS_H: f64 = MAX_VISIBLE_ROWS as f64 * ROW_H;
 // Session-only recents ring buffer capacity (in-memory, reset on quit).
 const RECENTS_CAP: usize = 12;
 const ROW_ICON: f64 = 26.0;
-const CORNER_RADIUS: f64 = 20.0;
+const CORNER_RADIUS: f64 = 28.0;
 // Shared left/right margin for the search field, separator, and result rows so
 // everything aligns on a common edge.
 const SIDE_INSET: f64 = 22.0;
@@ -304,15 +305,15 @@ struct ShortcutEntry {
 struct Ivars {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
-    /// Menu-material vibrancy behind chips and results (hidden until expanded).
+    /// Single Menu-material vibrancy surface for the whole panel (search area,
+    /// chips, and results). Always visible; the chrome elements are simply
+    /// shown/hidden so the panel reads as one continuous Spotlight-style surface.
     panel_shell: Retained<NSVisualEffectView>,
-    /// Whether the full panel chrome (shell, chips, results band) is visible.
+    /// Whether the full panel chrome (chips, results band) is visible.
     panel_expanded: Cell<bool>,
-    /// Rounded "pill" background behind the search field (Spotlight-style).
-    /// A frosted vibrancy view so the field reads as a solid floating box even
-    /// when the panel is collapsed (no see-through to the desktop).
-    search_bg: Retained<NSVisualEffectView>,
-    /// Leading magnifier glyph inside the search pill.
+    /// Leading magnifier glyph in the search area. A DIRECT subview of the root
+    /// content view (same coordinate space as the results scrollview, chips, and
+    /// separator). Reframed by manual `setFrame` every `layout` pass.
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
@@ -742,34 +743,14 @@ impl AppDelegate {
             ivars.table.reloadData();
         }
         self.layout(ivars.results.borrow().len(), animated);
-        // Expanding moves the search pill from the collapsed (centered) band to
-        // the top band, which reframes the NSTextField. If the field is being
-        // edited, reframing leaves its field editor stranded at the old frame so
-        // the character that triggered the expand isn't drawn until the next
-        // keystroke. Re-attach the field editor at the new frame, preserving the
-        // typed text and caret, so the first character renders immediately.
-        if want {
-            self.resync_field_editor();
-        }
-    }
-
-    /// Re-attach the search field's field editor at the field's current frame
-    /// without losing the typed text or caret position. Used after a relayout
-    /// that moves the field while it is being edited (collapsed -> expanded).
-    fn resync_field_editor(&self) {
-        let ivars = self.ivars();
-        let Some(editor) = ivars.search.currentEditor() else {
-            return;
-        };
-        let sel: NSRange = unsafe { msg_send![&*editor, selectedRange] };
-        // Re-making first responder ends/begins editing, which repositions the
-        // field editor to the field's new frame.
-        ivars.panel.makeFirstResponder(Some(&*ivars.search));
-        if let Some(editor) = ivars.search.currentEditor() {
-            unsafe {
-                let _: () = msg_send![&*editor, setSelectedRange: sel];
-            }
-        }
+        // Expanding grows the panel and moves the search pill into the top band.
+        // The search field + icon are DIRECT subviews of the root content view
+        // and are reframed by manual `setFrame` every layout pass (same single
+        // coordinate model as the results/chips/separator). With the collapsed->
+        // expanded grow now performed NON-animated (snap open, see `layout`),
+        // the field's layer never gets an implicit Core Animation position
+        // slide, so the just-typed first character renders in place immediately
+        // — no field-editor resync / makeFirstResponder churn is needed.
     }
 
     /// Expand the panel chrome immediately (chat, AI, status rows).
@@ -822,7 +803,6 @@ impl AppDelegate {
             || self.wants_panel_expanded();
         ivars.panel_expanded.set(expanded);
         if !expanded {
-            ivars.panel_shell.setAlphaValue(0.0);
             for chip in &ivars.chips {
                 chip.setHidden(true);
             }
@@ -908,7 +888,6 @@ impl AppDelegate {
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
         ivars.panel_expanded.set(false);
-        ivars.panel_shell.setAlphaValue(0.0);
         for chip in &ivars.chips {
             chip.setHidden(true);
         }
@@ -1668,21 +1647,39 @@ impl AppDelegate {
             NSPoint::new(x, origin_y),
             NSSize::new(PANEL_WIDTH, total_h),
         );
-        let shell_alpha = if expanded { 1.0 } else { 0.0 };
-        if animated {
+        // FLICKER FIX (93bcc0): the first-keystroke flicker (the just-typed char
+        // sliding from the old field position) only ever occurred on the SINGLE
+        // `animated:true` collapsed->expanded GROW. During an animated window
+        // resize, the layer-backed search field's backing CALayer gets an
+        // IMPLICIT Core Animation position animation, so the field's text slides
+        // into place over ~0.2s. Every other layout is `animated:false` and
+        // renders fine. The simple, robust fix is to SNAP the panel open
+        // (non-animated) on the grow, so there is no implicit layer position
+        // animation to slide the field — the typed character renders in place
+        // immediately. We still animate the COLLAPSE (shrink), which has no
+        // field-edit in flight and preserves the collapse-transparency behavior.
+        //
+        // `animated` is only ever true here when the expansion state changes
+        // (sync_panel_expansion), i.e. exactly the grow (expand) and shrink
+        // (collapse) transitions; comparing the target height to the current
+        // panel height distinguishes the two. A growing target == expand == snap.
+        let growing = frame.size.height > ivars.panel.frame().size.height + 0.5;
+        let animate_resize = animated && !growing;
+        if animate_resize {
             unsafe {
                 NSAnimationContext::beginGrouping();
                 let ctx = NSAnimationContext::currentContext();
                 ctx.setDuration(PANEL_EXPAND_DURATION);
                 let panel_anim: Retained<AnyObject> = msg_send![&*ivars.panel, animator];
                 let _: () = msg_send![&panel_anim, setFrame: frame, display: true];
-                let shell_anim: Retained<AnyObject> = msg_send![&*ivars.panel_shell, animator];
-                let _: () = msg_send![&shell_anim, setAlphaValue: shell_alpha];
                 NSAnimationContext::endGrouping();
             }
         } else {
+            // Snap (no animation): collapsed->expanded grow, and all the routine
+            // `animated:false` relayouts. With no animated grow the field's layer
+            // cannot acquire an implicit position animation, so the first typed
+            // character paints in place with no slide.
             ivars.panel.setFrame_display(frame, true);
-            ivars.panel_shell.setAlphaValue(shell_alpha);
         }
 
         for chip in &ivars.chips {
@@ -1709,32 +1706,27 @@ impl AppDelegate {
             }
         }
 
-        // Search pill: top band when expanded, vertically centered when collapsed.
+        // Search area: the magnifier icon + text field are DIRECT subviews of
+        // the root content view and are framed HERE every layout pass, using the
+        // SAME non-flipped root coordinate space as the chips / separator /
+        // results scrollview below. There is ONE coordinate model for every panel
+        // subview — no container, no autoresizing mask, no constraints, no
+        // layer-action tricks. The search band is the TOP band of the panel:
+        // it spans y = [total_h - SEARCH_AREA_H, total_h]. The pill sits
+        // SEARCH_TOP_PAD below the panel TOP; in a non-flipped view the top edge
+        // is the larger y, so we subtract from `total_h` to get the pill bottom.
+        let pill_bottom = total_h - SEARCH_TOP_PAD - SEARCH_PILL_H;
         let pill_x = SIDE_INSET;
         let pill_w = PANEL_WIDTH - 2.0 * SIDE_INSET;
-        let pill_y = if expanded {
-            let search_area_bottom = band_bottom + CHIP_ROW_H;
-            (search_area_bottom + SEARCH_TO_CHIP_GAP).round()
-        } else {
-            SEARCH_TOP_PAD.round()
-        };
-        ivars.search_bg.setFrame(NSRect::new(
-            NSPoint::new(pill_x, pill_y),
-            NSSize::new(pill_w, SEARCH_PILL_H),
-        ));
-
         let icon_x = pill_x + SEARCH_PILL_PAD_X;
-        let icon_y = (pill_y + (SEARCH_PILL_H - SEARCH_ICON) / 2.0).round();
+        let icon_y = (pill_bottom + (SEARCH_PILL_H - SEARCH_ICON) / 2.0).round();
         ivars.search_icon.setFrame(NSRect::new(
             NSPoint::new(icon_x, icon_y),
             NSSize::new(SEARCH_ICON, SEARCH_ICON),
         ));
-
-        // Text field sized to its exact text height and centered in the pill, so
-        // the text lands on the pill's vertical midline.
         let search_h = line_height(SEARCH_FONT_SIZE, false);
         let text_x = icon_x + SEARCH_ICON + SEARCH_ICON_GAP;
-        let search_y = (pill_y + (SEARCH_PILL_H - search_h) / 2.0).round();
+        let search_y = (pill_bottom + (SEARCH_PILL_H - search_h) / 2.0).round();
         let search_w = (pill_x + pill_w - SEARCH_PILL_PAD_X - text_x).max(40.0);
         ivars.search.setFrame(NSRect::new(
             NSPoint::new(text_x, search_y),
@@ -1764,11 +1756,19 @@ impl AppDelegate {
             sync_results_table_geometry(&ivars.scroll, &ivars.table, total_table_h);
         }
 
-        // Keep the material shell sized to the full expanded chrome height.
-        let shell_h = SEARCH_AREA_H + CHIP_ROW_H + results_block;
+        // Keep the material shell sized to exactly the window content height in
+        // both states. Sizing it to a fixed full-chrome height instead left the
+        // collapsed shell (108) taller than the collapsed window (72); during an
+        // animated expand->collapse the effect view's ViewHeightSizable mask then
+        // shrank it by the full (large) height delta, dropping it below the
+        // visible pill and exposing the transparent root. Matching total_h means
+        // the shell == root bounds (zero margins), so autoresizing keeps it
+        // pinned to fill the window for the whole animation. When expanded this
+        // equals the previous SEARCH_AREA_H + CHIP_ROW_H + results_block, so the
+        // expanded layout is unchanged.
         ivars.panel_shell.setFrame(NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(PANEL_WIDTH, shell_h),
+            NSSize::new(PANEL_WIDTH, total_h),
         ));
     }
 }
@@ -2497,7 +2497,6 @@ struct PanelViews {
     panel: Retained<LcPanel>,
     panel_shell: Retained<NSVisualEffectView>,
     search: Retained<NSTextField>,
-    search_bg: Retained<NSVisualEffectView>,
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
@@ -2537,46 +2536,42 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
 
     // Root clips the square window frame to rounded corners; the vibrancy view
-    // fills it so header, chips, and results share one material surface.
+    // fills it so the search area, chips, and results all share one continuous
+    // material surface (no separate floating search pill, no two-tone seam).
     let root = NSView::initWithFrame(NSView::alloc(mtm), content_rect);
     apply_rounded_clip(&root, CORNER_RADIUS);
 
+    // Single unified, opaque-looking vibrancy surface for the entire panel. It
+    // stays fully visible in both the collapsed (search-only) and expanded
+    // states, so the typing area reads as the top of the panel itself, flush to
+    // the rounded border. Chips/results sit on top and are shown/hidden.
     let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content_rect);
     effect.setMaterial(NSVisualEffectMaterial::Menu);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
-    effect.setAutoresizingMask(
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
     root.addSubview(&effect);
+    // Pin the frosted shell to fill the root content view exactly, in both
+    // states and throughout animated window/content-view resizes. Auto Layout
+    // constraints (not the old ViewWidthSizable|ViewHeightSizable autoresizing
+    // mask) are immune to the autoresize-delta race that previously drove the
+    // shell height to 0 on a large animated collapse (542->72), leaving the
+    // interior transparent. Only this full-bleed background view uses
+    // constraints; all other subviews are still positioned by frame in layout().
+    effect.setTranslatesAutoresizingMaskIntoConstraints(false);
+    NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+        effect
+            .leadingAnchor()
+            .constraintEqualToAnchor(&root.leadingAnchor()),
+        effect
+            .trailingAnchor()
+            .constraintEqualToAnchor(&root.trailingAnchor()),
+        effect.topAnchor().constraintEqualToAnchor(&root.topAnchor()),
+        effect
+            .bottomAnchor()
+            .constraintEqualToAnchor(&root.bottomAnchor()),
+    ]));
 
-    // Spotlight-style rounded pill background behind the search field. This is a
-    // frosted vibrancy view (not a faint translucent fill) so the pill reads as
-    // a solid floating search box rather than see-through to the desktop. It is
-    // always visible — both collapsed and expanded — sized/positioned in
-    // `layout`. Corner radius + masking give it fully rounded ends, plus a
-    // hairline border.
-    let search_bg = NSVisualEffectView::initWithFrame(
-        NSVisualEffectView::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, SEARCH_PILL_H)),
-    );
-    search_bg.setMaterial(NSVisualEffectMaterial::Menu);
-    search_bg.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    search_bg.setState(NSVisualEffectState::Active);
-    search_bg.setWantsLayer(true);
-    if let Some(layer) = search_bg.layer() {
-        let border = NSColor::labelColor().colorWithAlphaComponent(0.10);
-        unsafe {
-            let border_cg: *mut AnyObject = msg_send![&*border, CGColor];
-            let _: () = msg_send![&*layer, setCornerRadius: SEARCH_PILL_H / 2.0];
-            let _: () = msg_send![&*layer, setMasksToBounds: true];
-            let _: () = msg_send![&*layer, setBorderWidth: 1.0_f64];
-            let _: () = msg_send![&*layer, setBorderColor: border_cg];
-        }
-    }
-
-    // Leading magnifier glyph inside the pill.
+    // Leading magnifier glyph at the start of the search area.
     let search_icon = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SEARCH_ICON, SEARCH_ICON)),
@@ -2688,20 +2683,29 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
-    effect.setAlphaValue(0.0);
     for chip in &chips {
         chip.setHidden(true);
     }
-    root.addSubview(&search_bg);
+    // SIMPLIFIED (93bcc0): the magnifier icon + search text field are DIRECT
+    // subviews of the root content view — the SAME view (and coordinate space)
+    // the results scrollview/chips/separator live relative to in `layout`. No
+    // container subclass, no autoresizing mask, no Auto Layout constraints, and
+    // no layer-action / implicit-animation suppression. They are added on top of
+    // the frosted `panel_shell` (added to root first, above), so the search pill
+    // draws over the material while the chips/results (children of the shell)
+    // sit below it. Their frames are set every layout pass by `layout()` using
+    // the one shared coordinate model; the initial frames set during field
+    // construction above are placeholders that `layout()` (run on `show`)
+    // immediately overrides.
     root.addSubview(&search_icon);
     root.addSubview(&search);
+
     panel.setContentView(Some(&root));
 
     PanelViews {
         panel,
         panel_shell: effect,
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
@@ -2921,7 +2925,6 @@ fn main() {
         panel,
         panel_shell,
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
@@ -3021,7 +3024,6 @@ fn main() {
         panel_shell,
         panel_expanded: Cell::new(false),
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
