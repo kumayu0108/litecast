@@ -76,6 +76,10 @@ const SEARCH_PILL_H: f64 = 48.0;
 const SEARCH_TOP_PAD: f64 = 12.0;
 const SEARCH_TO_CHIP_GAP: f64 = 8.0;
 const SEARCH_AREA_H: f64 = SEARCH_TOP_PAD + SEARCH_PILL_H + SEARCH_TO_CHIP_GAP;
+/// Compact panel height when idle (search pill only, no chip/results chrome).
+const COLLAPSED_PANEL_H: f64 = SEARCH_TOP_PAD + SEARCH_PILL_H + SEARCH_TOP_PAD;
+/// Expand/collapse animation for the material shell and panel height.
+const PANEL_EXPAND_DURATION: f64 = 0.2;
 const SEARCH_ICON: f64 = 19.0;
 // Point size of the typed query text.
 const SEARCH_FONT_SIZE: f64 = 22.0;
@@ -300,6 +304,10 @@ struct ShortcutEntry {
 struct Ivars {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
+    /// Menu-material vibrancy behind chips and results (hidden until expanded).
+    panel_shell: Retained<NSVisualEffectView>,
+    /// Whether the full panel chrome (shell, chips, results band) is visible.
+    panel_expanded: Cell<bool>,
     /// Rounded "pill" background behind the search field (Spotlight-style).
     search_bg: Retained<NSView>,
     /// Leading magnifier glyph inside the search pill.
@@ -414,7 +422,7 @@ define_class!(
 
         #[unsafe(method(windowDidChangeScreen:))]
         fn window_did_change_screen(&self, _notification: &NSNotification) {
-            self.layout(self.ivars().results.borrow().len());
+            self.layout(self.ivars().results.borrow().len(), false);
         }
     }
 
@@ -695,8 +703,56 @@ impl AppDelegate {
     fn set_filter(&self, filter: Filter) {
         let ivars = self.ivars();
         ivars.active_filter.set(filter);
-        self.layout(ivars.results.borrow().len());
+        self.sync_panel_expansion(false);
+        self.layout(ivars.results.borrow().len(), false);
         self.dispatch_query();
+    }
+
+    /// True when the full panel chrome should be shown (typing, filters, chat, etc.).
+    fn wants_panel_expanded(&self) -> bool {
+        let ivars = self.ivars();
+        if ivars.chat_active.get() || ivars.screenshot_path.borrow().is_some() {
+            return true;
+        }
+        if ivars.active_filter.get() != Filter::All {
+            return true;
+        }
+        let raw = ivars.search.stringValue().to_string();
+        if parse_autocomplete_token(&raw).is_some() {
+            return true;
+        }
+        match parse_filter_prefix(&raw) {
+            Some((_, rest)) => !rest.trim().is_empty(),
+            None => !raw.trim().is_empty(),
+        }
+    }
+
+    /// Show or hide the material shell and chip/results chrome when query state changes.
+    fn sync_panel_expansion(&self, animated: bool) {
+        let want = self.wants_panel_expanded();
+        let ivars = self.ivars();
+        if ivars.panel_expanded.get() == want {
+            return;
+        }
+        ivars.panel_expanded.set(want);
+        if !want {
+            *ivars.results.borrow_mut() = Vec::new();
+            ivars.table.reloadData();
+        }
+        self.layout(ivars.results.borrow().len(), animated);
+    }
+
+    /// Expand the panel chrome immediately (chat, AI, status rows).
+    fn ensure_panel_expanded(&self) {
+        let ivars = self.ivars();
+        if ivars.panel_expanded.get() {
+            return;
+        }
+        ivars.panel_expanded.set(true);
+        ivars.panel_shell.setAlphaValue(1.0);
+        for chip in &ivars.chips {
+            chip.setHidden(false);
+        }
     }
 
     /// Leave follow-up chat mode and return to normal search (panel stays open).
@@ -710,7 +766,7 @@ impl AppDelegate {
         set_placeholder(&ivars.search, PLACEHOLDER_NORMAL);
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
-        self.layout(0);
+        self.sync_panel_expansion(true);
     }
 
     fn show(&self) {
@@ -730,16 +786,20 @@ impl AppDelegate {
             menu_cache::refresh(ivars.prev_app_pid.get(), 80);
         }
 
-        self.layout(ivars.results.borrow().len());
-
-        // Normal launcher open with an empty field: surface session recents.
-        // Skipped in screenshot mode (its own empty state) and chat mode.
-        if ivars.screenshot_path.borrow().is_none()
-            && !ivars.chat_active.get()
-            && ivars.search.stringValue().to_string().trim().is_empty()
-        {
-            self.render_recents();
+        // Idle open: pill only. Full chrome animates in once the user types.
+        let expanded = ivars.chat_active.get()
+            || ivars.screenshot_path.borrow().is_some()
+            || self.wants_panel_expanded();
+        ivars.panel_expanded.set(expanded);
+        if !expanded {
+            ivars.panel_shell.setAlphaValue(0.0);
+            for chip in &ivars.chips {
+                chip.setHidden(true);
+            }
+            *ivars.results.borrow_mut() = Vec::new();
+            ivars.table.reloadData();
         }
+        self.layout(ivars.results.borrow().len(), false);
 
         // Rotate a playful placeholder (unless in screenshot mode).
         if ivars.playful_placeholders && ivars.screenshot_path.borrow().is_none() {
@@ -817,6 +877,12 @@ impl AppDelegate {
         set_placeholder(&ivars.search, PLACEHOLDER_NORMAL);
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
+        ivars.panel_expanded.set(false);
+        ivars.panel_shell.setAlphaValue(0.0);
+        for chip in &ivars.chips {
+            chip.setHidden(true);
+        }
+        self.layout(0, false);
     }
 
     fn dispatch_query(&self) {
@@ -829,6 +895,8 @@ impl AppDelegate {
             self.render_chat();
             return;
         }
+
+        self.sync_panel_expansion(true);
 
         // Consume the "last edit was a deletion" flag exactly once per change.
         let suppress_ghost = ivars.suppress_ghost.replace(false);
@@ -848,7 +916,7 @@ impl AppDelegate {
             Some((filter, rest)) => {
                 if ivars.active_filter.get() != filter {
                     ivars.active_filter.set(filter);
-                    self.layout(ivars.results.borrow().len());
+                    self.layout(ivars.results.borrow().len(), false);
                 }
                 rest
             }
@@ -884,15 +952,17 @@ impl AppDelegate {
             };
             *ivars.results.borrow_mut() = vec![item];
             ivars.table.reloadData();
-            self.layout(1);
+            self.layout(1, false);
             self.select_row(0);
             return;
         }
 
         if query.trim().is_empty() {
-            // Empty query in normal launcher mode shows session recents instead
-            // of a blank panel. No providers run.
-            self.render_recents();
+            // Empty query with expanded chrome shows session recents; collapsed
+            // idle state stays pill-only until the user types again.
+            if ivars.panel_expanded.get() {
+                self.render_recents();
+            }
             return;
         }
         // On-demand critter: typing the easter-egg keyword sends one strolling
@@ -913,7 +983,7 @@ impl AppDelegate {
             let n = items.len();
             *ivars.results.borrow_mut() = items;
             ivars.table.reloadData();
-            self.layout(n);
+            self.layout(n, false);
             if n > 0 {
                 self.select_row(0);
             }
@@ -987,6 +1057,9 @@ impl AppDelegate {
     /// nothing yet.
     fn render_recents(&self) {
         let ivars = self.ivars();
+        if !ivars.panel_expanded.get() {
+            return;
+        }
         let mut items: Vec<Item> = Vec::new();
         if let Some(la) = ivars.last_ai.borrow().as_ref() {
             items.push(Item::new(
@@ -1003,7 +1076,7 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n);
+        self.layout(n, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1075,7 +1148,7 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n);
+        self.layout(n, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1126,7 +1199,8 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n);
+        self.ensure_panel_expanded();
+        self.layout(n, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1291,7 +1365,8 @@ impl AppDelegate {
             action,
         )];
         ivars.table.reloadData();
-        self.layout(1);
+        self.ensure_panel_expanded();
+        self.layout(1, false);
         self.select_row(0);
     }
 
@@ -1332,7 +1407,8 @@ impl AppDelegate {
             Action::None,
         )];
         ivars.table.reloadData();
-        self.layout(1);
+        self.ensure_panel_expanded();
+        self.layout(1, false);
 
         let config = ivars.ai_config.clone();
         let pending = ivars.ai_pending.clone();
@@ -1395,7 +1471,8 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n);
+        self.ensure_panel_expanded();
+        self.layout(n, false);
         self.select_row(0);
     }
 
@@ -1440,7 +1517,8 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n);
+        self.ensure_panel_expanded();
+        self.layout(n, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1512,14 +1590,15 @@ impl AppDelegate {
     }
 
     /// Resize the panel to fit `rows` results and reposition the subviews.
-    fn layout(&self, _rows: usize) {
+    fn layout(&self, _rows: usize, animated: bool) {
         let ivars = self.ivars();
+        let expanded = ivars.panel_expanded.get();
         // Sum the actual per-row heights (AI answer blocks are taller than a
         // normal row), capped so the panel never grows unbounded; overflow
         // scrolls within the results band.
         let (results_h, has_rows) = {
             let results = ivars.results.borrow();
-            if results.is_empty() {
+            if !expanded || results.is_empty() {
                 (0.0, false)
             } else {
                 let total: f64 = results.iter().map(row_height_for).sum();
@@ -1534,9 +1613,12 @@ impl AppDelegate {
             0.0
         };
         // Vertical bands, top to bottom: search area, category chip row, the
-        // hairline separator, then the results block. The chip row is always
-        // present, so it always contributes to the panel height.
-        let total_h = SEARCH_AREA_H + CHIP_ROW_H + results_block;
+        // hairline separator, then the results block.
+        let total_h = if expanded {
+            SEARCH_AREA_H + CHIP_ROW_H + results_block
+        } else {
+            COLLAPSED_PANEL_H
+        };
         // Top of the results block / where the separator and chip row sit.
         let band_bottom = results_block;
 
@@ -1556,33 +1638,56 @@ impl AppDelegate {
             NSPoint::new(x, origin_y),
             NSSize::new(PANEL_WIDTH, total_h),
         );
-        ivars.panel.setFrame_display(frame, true);
+        let shell_alpha = if expanded { 1.0 } else { 0.0 };
+        if animated {
+            unsafe {
+                NSAnimationContext::beginGrouping();
+                let ctx = NSAnimationContext::currentContext();
+                ctx.setDuration(PANEL_EXPAND_DURATION);
+                let panel_anim: Retained<AnyObject> = msg_send![&*ivars.panel, animator];
+                let _: () = msg_send![&panel_anim, setFrame: frame, display: true];
+                let shell_anim: Retained<AnyObject> = msg_send![&*ivars.panel_shell, animator];
+                let _: () = msg_send![&shell_anim, setAlphaValue: shell_alpha];
+                NSAnimationContext::endGrouping();
+            }
+        } else {
+            ivars.panel.setFrame_display(frame, true);
+            ivars.panel_shell.setAlphaValue(shell_alpha);
+        }
+
+        for chip in &ivars.chips {
+            chip.setHidden(!expanded);
+        }
 
         // Spotlight-style category chip row in its own band, just under the
         // search field. Highlight reflects the active filter (driven equally by
         // clicks, Tab cycling, and @prefix typing).
-        let active = ivars.active_filter.get();
-        let chip_y = (band_bottom + (CHIP_ROW_H - CHIP_H) / 2.0).round();
-        let mut chip_x = SIDE_INSET;
-        for (i, chip) in ivars.chips.iter().enumerate() {
-            let filter = Filter::CYCLE[i];
-            style_chip(chip, filter.label(), filter == active);
-            chip.sizeToFit();
-            let chip_w = chip.frame().size.width.round();
-            chip.setFrame(NSRect::new(
-                NSPoint::new(chip_x, chip_y),
-                NSSize::new(chip_w, CHIP_H),
-            ));
-            chip_x += chip_w + CHIP_GAP;
+        if expanded {
+            let active = ivars.active_filter.get();
+            let chip_y = (band_bottom + (CHIP_ROW_H - CHIP_H) / 2.0).round();
+            let mut chip_x = SIDE_INSET;
+            for (i, chip) in ivars.chips.iter().enumerate() {
+                let filter = Filter::CYCLE[i];
+                style_chip(chip, filter.label(), filter == active);
+                chip.sizeToFit();
+                let chip_w = chip.frame().size.width.round();
+                chip.setFrame(NSRect::new(
+                    NSPoint::new(chip_x, chip_y),
+                    NSSize::new(chip_w, CHIP_H),
+                ));
+                chip_x += chip_w + CHIP_GAP;
+            }
         }
 
-        // Spotlight-style search pill in the top search band (above the chip row).
-        // Asymmetric vertical placement: top inset above the pill, small gap to
-        // chips — not vertically centered in SEARCH_AREA_H.
-        let search_area_bottom = band_bottom + CHIP_ROW_H;
+        // Search pill: top band when expanded, vertically centered when collapsed.
         let pill_x = SIDE_INSET;
         let pill_w = PANEL_WIDTH - 2.0 * SIDE_INSET;
-        let pill_y = (search_area_bottom + SEARCH_TO_CHIP_GAP).round();
+        let pill_y = if expanded {
+            let search_area_bottom = band_bottom + CHIP_ROW_H;
+            (search_area_bottom + SEARCH_TO_CHIP_GAP).round()
+        } else {
+            SEARCH_TOP_PAD.round()
+        };
         ivars.search_bg.setFrame(NSRect::new(
             NSPoint::new(pill_x, pill_y),
             NSSize::new(pill_w, SEARCH_PILL_H),
@@ -1612,7 +1717,7 @@ impl AppDelegate {
             NSSize::new(PANEL_WIDTH - 2.0 * SIDE_INSET, 1.0),
         );
         ivars.separator.setFrame(separator_frame);
-        ivars.separator.setHidden(!has_rows);
+        ivars.separator.setHidden(!expanded || !has_rows);
 
         // Results scroll view, inset above the bottom padding so the last row
         // is fully visible and clears the rounded corners. The scroll band is
@@ -1623,11 +1728,18 @@ impl AppDelegate {
             NSSize::new(PANEL_WIDTH, results_h + RESULTS_SCROLL_BOTTOM_INSET),
         );
         ivars.scroll.setFrame(scroll_frame);
-        ivars.scroll.setHidden(!has_rows);
+        ivars.scroll.setHidden(!expanded || !has_rows);
         if has_rows {
             let total_table_h: f64 = ivars.results.borrow().iter().map(row_height_for).sum();
             sync_results_table_geometry(&ivars.scroll, &ivars.table, total_table_h);
         }
+
+        // Keep the material shell sized to the full expanded chrome height.
+        let shell_h = SEARCH_AREA_H + CHIP_ROW_H + results_block;
+        ivars.panel_shell.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PANEL_WIDTH, shell_h),
+        ));
     }
 }
 
@@ -2353,6 +2465,7 @@ fn make_row_cell(
 
 struct PanelViews {
     panel: Retained<LcPanel>,
+    panel_shell: Retained<NSVisualEffectView>,
     search: Retained<NSTextField>,
     search_bg: Retained<NSView>,
     search_icon: Retained<NSImageView>,
@@ -2533,11 +2646,8 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     critter_label.setHidden(true);
     critter_label.setFont(Some(&NSFont::systemFontOfSize(22.0)));
 
-    // Pill background sits behind the field + icon; add it first so it draws
-    // underneath them.
-    effect.addSubview(&search_bg);
-    effect.addSubview(&search_icon);
-    effect.addSubview(&search);
+    // Chips, separator, and results live on the material shell so it can fade
+    // independently while the search pill stays visible on the root view.
     effect.addSubview(&scroll);
     effect.addSubview(&separator);
     for chip in &chips {
@@ -2545,10 +2655,18 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
+    effect.setAlphaValue(0.0);
+    for chip in &chips {
+        chip.setHidden(true);
+    }
+    root.addSubview(&search_bg);
+    root.addSubview(&search_icon);
+    root.addSubview(&search);
     panel.setContentView(Some(&root));
 
     PanelViews {
         panel,
+        panel_shell: effect,
         search,
         search_bg,
         search_icon,
@@ -2768,6 +2886,7 @@ fn main() {
     let views = build_panel(mtm);
     let PanelViews {
         panel,
+        panel_shell,
         search,
         search_bg,
         search_icon,
@@ -2866,6 +2985,8 @@ fn main() {
 
     let ivars = Ivars {
         panel,
+        panel_shell,
+        panel_expanded: Cell::new(false),
         search,
         search_bg,
         search_icon,
