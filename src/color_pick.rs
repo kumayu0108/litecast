@@ -60,7 +60,10 @@ fn read_png_hex(path: &PathBuf) -> Result<String, String> {
 
 pub fn format_color_detail(hex: &str) -> String {
     let h = hex.trim_start_matches('#');
-    if h.len() != 6 {
+    // Require exactly 6 ASCII hex digits before byte-slicing: a 6-byte string
+    // containing a multibyte char (e.g. "aébcd") would split a char boundary
+    // and panic.
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return hex.to_string();
     }
     let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(0);

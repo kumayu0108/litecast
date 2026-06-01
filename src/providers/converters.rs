@@ -110,7 +110,14 @@ fn parse_color(input: &str) -> Option<(u8, u8, u8)> {
 
 fn parse_hex(hex: &str) -> Option<(u8, u8, u8)> {
     let hex = hex.trim();
-    match hex.len() {
+    // Guard against multibyte / non-hex input (e.g. "#aé"): byte-slicing such a
+    // string can land on a non-char boundary and panic. Operate on bytes only
+    // once we've confirmed every byte is an ASCII hex digit.
+    let bytes = hex.as_bytes();
+    if !bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match bytes.len() {
         6 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
@@ -384,5 +391,33 @@ fn date_format(secs: i64, utc: bool) -> Option<String> {
         None
     } else {
         Some(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_never_panics_on_bad_input() {
+        // Multibyte / non-hex inputs must return None rather than panicking on a
+        // non-char-boundary byte slice.
+        assert_eq!(parse_hex("aé"), None);
+        assert_eq!(parse_hex("zz"), None);
+        assert_eq!(parse_hex(""), None);
+        // Valid forms still parse.
+        assert_eq!(parse_hex("fff"), Some((255, 255, 255)));
+        assert_eq!(parse_hex("ffffff"), Some((255, 255, 255)));
+        assert_eq!(parse_hex("000000"), Some((0, 0, 0)));
+    }
+
+    #[test]
+    fn parse_color_handles_multibyte_input() {
+        // The full color path with the `#` prefix used to panic on `#aé`.
+        assert_eq!(parse_color("#aé"), None);
+        assert_eq!(parse_color("#zz"), None);
+        assert_eq!(parse_color("#"), None);
+        assert_eq!(parse_color("#fff"), Some((255, 255, 255)));
+        assert_eq!(parse_color("#ffffff"), Some((255, 255, 255)));
     }
 }

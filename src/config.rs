@@ -722,7 +722,19 @@ pub fn merged_app_commands(user: &[AppCommandConfig]) -> Vec<AppCommandConfig> {
 pub fn load() -> Config {
     let path = support_file(CONFIG_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+        Ok(contents) => match toml::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                // A parse error must NOT silently clobber the user's config.
+                // Leave the file on disk untouched and fall back to defaults
+                // for THIS run only, so a stray typo can't wipe their settings.
+                eprintln!(
+                    "litecast: failed to parse {} ({e}). Using defaults for this run; your file was left unchanged.",
+                    path.display()
+                );
+                Config::default()
+            }
+        },
         Err(_) => {
             let _ = std::fs::write(&path, DEFAULT_CONFIG_TOML);
             Config::default()

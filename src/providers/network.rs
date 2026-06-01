@@ -85,7 +85,7 @@ impl NetworkProvider {
     fn push_public_ip(&self, out: &mut Vec<Item>) {
         // Serve a fresh-enough cached value if available.
         {
-            let guard = self.public_ip.lock().unwrap();
+            let guard = self.public_ip.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((t, ip)) = guard.as_ref() {
                 if t.elapsed() < PUBLIC_IP_TTL {
                     out.push(public_ip_item(ip));
@@ -95,7 +95,8 @@ impl NetworkProvider {
         }
         match fetch_public_ip() {
             Some(ip) => {
-                *self.public_ip.lock().unwrap() = Some((Instant::now(), ip.clone()));
+                *self.public_ip.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((Instant::now(), ip.clone()));
                 out.push(public_ip_item(&ip));
             }
             None => out.push(Item::new(
@@ -121,11 +122,16 @@ fn public_ip_item(ip: &str) -> Item {
 
 fn local_ip() -> Option<String> {
     for iface in ["en0", "en1", "en2"] {
-        let out = Command::new("/usr/sbin/ipconfig")
+        // A transient failure on one interface must not abort the whole lookup;
+        // skip it and try the next rather than returning None (or panicking).
+        let out = match Command::new("/usr/sbin/ipconfig")
             .arg("getifaddr")
             .arg(iface)
             .output()
-            .ok()?;
+        {
+            Ok(out) => out,
+            Err(_) => continue,
+        };
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() {
             return Some(s);

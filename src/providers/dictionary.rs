@@ -83,7 +83,12 @@ impl DictionaryProvider {
     /// Try macOS Dictionary Services via python3 (PyObjC). Returns `None` when
     /// python3/the framework is unavailable. Cached per word.
     fn lookup_definition(&self, word: &str) -> Option<String> {
-        if let Some(cached) = self.def_cache.lock().unwrap().get(word) {
+        if let Some(cached) = self
+            .def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(word)
+        {
             return cached.clone();
         }
         let script = "import sys\nfrom DictionaryServices import DCSCopyTextDefinition\nw=sys.argv[1]\nd=DCSCopyTextDefinition(None,w,(0,len(w)))\nsys.stdout.write(d or '')";
@@ -107,14 +112,14 @@ impl DictionaryProvider {
             });
         self.def_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(word.to_string(), result.clone());
         result
     }
 
     fn spell(&self, word: &str, out: &mut Vec<Item>) {
         self.ensure_words();
-        let guard = self.words.lock().unwrap();
+        let guard = self.words.lock().unwrap_or_else(|e| e.into_inner());
         let Some(words) = guard.as_ref() else {
             out.push(Item::new(
                 "Word list unavailable",
@@ -169,7 +174,7 @@ impl DictionaryProvider {
     }
 
     fn ensure_words(&self) {
-        let mut guard = self.words.lock().unwrap();
+        let mut guard = self.words.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
             return;
         }

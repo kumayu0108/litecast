@@ -80,7 +80,9 @@ fn walk_menu(el: AXUIElementRef, path: Vec<String>, out: &mut Vec<MenuEntry>, ma
         out.push(MenuEntry { path: path.clone() });
     }
     for child in copy_children(el) {
-        walk_menu(child, path.clone(), out, max);
+        // `child` is a retained CFType that lives until the end of this
+        // iteration, so the AX ref stays valid for the whole recursive call.
+        walk_menu(child.as_CFTypeRef() as AXUIElementRef, path.clone(), out, max);
         if out.len() >= max {
             break;
         }
@@ -89,14 +91,26 @@ fn walk_menu(el: AXUIElementRef, path: Vec<String>, out: &mut Vec<MenuEntry>, ma
 
 fn find_child_by_title(parent: AXUIElementRef, title: &str) -> Option<AXUIElementRef> {
     for child in copy_children(parent) {
-        if element_title(child).as_deref() == Some(title) {
-            return Some(child);
+        let child_ref = child.as_CFTypeRef() as AXUIElementRef;
+        if element_title(child_ref).as_deref() == Some(title) {
+            // Transfer ownership of the retain held by `child` to the caller,
+            // which balances it with `wrap_under_create_rule`. Without the
+            // forget, dropping `child` here would release the element and hand
+            // back a dangling pointer (use-after-free).
+            std::mem::forget(child);
+            return Some(child_ref);
         }
     }
     None
 }
 
-fn copy_children(el: AXUIElementRef) -> Vec<AXUIElementRef> {
+/// Copy the child `AXUIElement`s of `el` as owned, retained `CFType` handles.
+///
+/// The underlying `CFArray` owns its elements and releases them when dropped;
+/// returning raw element pointers would therefore be a use-after-free. We
+/// instead retain each child into an owned `CFType` (via `wrap_under_get_rule`)
+/// so it stays alive for as long as the caller holds the handle.
+fn copy_children(el: AXUIElementRef) -> Vec<CFType> {
     let mut out = Vec::new();
     let Some(value) = copy_attr_value(el, kAXChildrenAttribute) else {
         return out;
@@ -107,7 +121,7 @@ fn copy_children(el: AXUIElementRef) -> Vec<AXUIElementRef> {
         if let Some(item) = arr.get(i) {
             let ptr = *item;
             if !ptr.is_null() {
-                out.push(ptr as AXUIElementRef);
+                out.push(unsafe { CFType::wrap_under_get_rule(ptr as CFTypeRef) });
             }
         }
     }

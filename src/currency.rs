@@ -95,7 +95,12 @@ fn rate_for(r: &Rates, code: &str) -> Option<f64> {
     if code == BASE {
         return Some(1.0);
     }
-    r.rates.get(&code).copied()
+    // Reject a zero, negative, or non-finite rate: it would otherwise produce a
+    // division-by-zero (inf/NaN) result in `convert`. Treat it as "unknown".
+    r.rates
+        .get(&code)
+        .copied()
+        .filter(|&v| v.is_finite() && v > 0.0)
 }
 
 /// Fetch rates from one of two key-less providers, chosen at random to spread

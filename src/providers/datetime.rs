@@ -313,12 +313,21 @@ fn try_date_math(q: &str, out: &mut Vec<Item>) -> bool {
     for prefix in ["today", "now"] {
         if let Some(rest) = compact.strip_prefix(prefix) {
             if let Some((sign, n, unit)) = parse_offset(rest) {
+                // `n` comes straight from user input, so guard every step with
+                // checked arithmetic; a huge offset must fail gracefully rather
+                // than overflow/panic.
                 let days = match unit {
                     'd' => n,
-                    'w' => n * 7,
+                    'w' => match n.checked_mul(7) {
+                        Some(v) => v,
+                        None => return false,
+                    },
                     _ => return false,
                 };
-                let target_days = today.1 + sign * days;
+                let Some(target_days) = sign.checked_mul(days).and_then(|d| today.1.checked_add(d))
+                else {
+                    return false;
+                };
                 let (y, m, d) = civil_from_days(target_days);
                 let result = format!("{y:04}-{m:02}-{d:02}");
                 out.push(Item::new(
@@ -414,7 +423,11 @@ fn valid_ymd(y: i64, m: u32, d: u32) -> Option<(i64, u32, u32)> {
 
 fn month_num(s: &str) -> Option<u32> {
     let m = s.trim().to_ascii_lowercase();
-    let n = match &m[..m.len().min(3)] {
+    // Take the first 3 *characters* (not bytes): slicing at a fixed byte index
+    // panics on multibyte input like "1 a😀". `.get(..3)` returns None on a
+    // non-char boundary, and `chars().take(3)` is always boundary-safe.
+    let prefix: String = m.chars().take(3).collect();
+    let n = match prefix.as_str() {
         "jan" => 1,
         "feb" => 2,
         "mar" => 3,
@@ -506,5 +519,23 @@ mod tests {
         assert_eq!(parse_duration("30s"), Some(30));
         assert_eq!(parse_duration("1h30m"), Some(5400));
         assert_eq!(parse_duration("2"), Some(120));
+    }
+
+    #[test]
+    fn month_num_never_panics_on_multibyte() {
+        // "1 a😀" reached `month_num("a😀")` which used to slice at byte 3,
+        // splitting the emoji and panicking. It must return None instead.
+        assert_eq!(month_num("a😀"), None);
+        assert_eq!(month_num("é"), None);
+        assert_eq!(month_num(""), None);
+        // Normal month names still parse.
+        assert_eq!(month_num("jan"), Some(1));
+        assert_eq!(month_num("December"), Some(12));
+    }
+
+    #[test]
+    fn parse_date_multibyte_is_safe() {
+        // The full "days until 1 a😀" path previously panicked here.
+        assert_eq!(parse_date("1 a😀", 2026), None);
     }
 }

@@ -642,11 +642,23 @@ define_class!(
         // button). The button's tag carries its row index.
         #[unsafe(method(copyAnswer:))]
         fn copy_answer(&self, sender: &NSButton) {
-            let row = sender.tag() as usize;
+            let tag = sender.tag();
+            // A negative tag (or one past the current result count) means the
+            // results changed since this button was built; ignore the stale tag.
+            if tag < 0 {
+                return;
+            }
+            let row = tag as usize;
             let text = {
                 let results = self.ivars().results.borrow();
-                match results.get(row).map(|i| &i.action) {
-                    Some(Action::CopyText(text)) => Some(text.clone()),
+                match results.get(row) {
+                    // Only an AI answer card (multiline) owns a copy button, so
+                    // validate the row really is one before copying. This stops a
+                    // stale tag from copying a different row's text.
+                    Some(item) if item.multiline => match &item.action {
+                        Action::CopyText(text) => Some(text.clone()),
+                        _ => None,
+                    },
                     _ => None,
                 }
             };

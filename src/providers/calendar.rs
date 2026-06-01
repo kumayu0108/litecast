@@ -68,7 +68,7 @@ impl Provider for CalendarProvider {
 impl CalendarProvider {
     fn today(&self, out: &mut Vec<Item>) {
         let events = {
-            let mut guard = self.cache.lock().unwrap();
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = guard
                 .as_ref()
                 .is_some_and(|(t, _)| t.elapsed() < CACHE_TTL);
