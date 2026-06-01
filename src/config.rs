@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::paths::support_file;
 
@@ -210,7 +210,7 @@ cycles = 4
 max_recent = 12
 "##;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub web_search_url: String,
@@ -265,7 +265,7 @@ impl Default for Config {
 /// Script commands. Executable scripts in `dir` are surfaced as runnable
 /// commands; metadata comment headers (`# @litecast.title:` etc.) customize how
 /// they appear and run.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ScriptsConfig {
     /// Scripts directory. Empty resolves to `scripts/` under the support dir;
@@ -275,7 +275,7 @@ pub struct ScriptsConfig {
 
 /// Git helper. Scans `scan_dirs` (lazily, on the `git`/`repo` keyword) for git
 /// repositories up to `max_depth` levels deep, plus any repos you have opened.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GitConfig {
     /// Directories to scan for repositories. Empty resolves to `~/Developer`,
@@ -325,7 +325,7 @@ impl GitConfig {
 
 /// Quick file/folder creation. New items are created relative to `base_dir`
 /// (default `~/Desktop`); `templates` define named starter files.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NewFileConfig {
     /// Base directory for relative `new file`/`new folder` paths. Empty = Desktop.
@@ -369,7 +369,7 @@ impl NewFileConfig {
 
 /// A named starter-file template. `name` is the filename (with extension)
 /// offered after `new`; `contents` is the initial text written into it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TemplateConfig {
     pub name: String,
     #[serde(default)]
@@ -377,7 +377,7 @@ pub struct TemplateConfig {
 }
 
 /// Pomodoro / focus timer durations (minutes).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PomodoroConfig {
     pub work_minutes: u64,
@@ -399,7 +399,7 @@ impl Default for PomodoroConfig {
 }
 
 /// Screen color picker. `max_recent` caps the persisted recent-colors palette.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ColorConfig {
     pub max_recent: usize,
@@ -413,7 +413,7 @@ impl Default for ColorConfig {
 
 /// Menu-bar search. Like window management it uses the Accessibility
 /// permission, so it is opt-in and OFF by default.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MenuConfig {
     pub enabled: bool,
@@ -421,7 +421,7 @@ pub struct MenuConfig {
 
 /// Quick-note capture settings. Notes are appended to a plain-text file (the
 /// reliable default); optionally also mirrored into Apple Notes.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NotesConfig {
     /// Notes file. A relative path is resolved under the support dir; an
@@ -433,7 +433,7 @@ pub struct NotesConfig {
 
 /// Date/time settings. `timezones` adds custom world-clock entries usable as
 /// "time in <name>".
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DateTimeConfig {
     pub timezones: Vec<TimezoneConfig>,
@@ -449,7 +449,7 @@ impl DateTimeConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TimezoneConfig {
     /// Friendly name typed after "time in" (e.g. "HQ").
     pub name: String,
@@ -460,7 +460,7 @@ pub struct TimezoneConfig {
 /// A user-defined global hotkey: a key combo (modifiers + key) bound to an
 /// action. Registered alongside the built-in toggle/screenshot hotkeys;
 /// registration failures are logged and non-fatal.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HotkeyConfig {
     /// Combo like "Cmd+Shift+S" (modifiers: Cmd/Ctrl/Alt/Shift + a key).
     pub key: String,
@@ -475,7 +475,7 @@ pub struct HotkeyConfig {
 /// `[[hotkeys]]` (modifiers + a key, e.g. "Cmd+Space", "Option+Space"). To use
 /// Cmd+Space, first free it in System Settings by disabling Spotlight's
 /// keyboard shortcut (see the README).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ToggleHotkeyConfig {
     /// Combo that shows/hides the launcher panel (default "Option+Space").
@@ -494,7 +494,7 @@ impl Default for ToggleHotkeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WindowConfig {
     /// Window management uses the Accessibility permission, so it is opt-in and
@@ -502,7 +502,7 @@ pub struct WindowConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ClipboardConfig {
     /// Capture images copied to the clipboard (stored under the support dir).
@@ -520,7 +520,7 @@ impl Default for ClipboardConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct QuicklinkConfig {
     pub name: String,
     /// Optional keyword that triggers the link with a `{query}` argument.
@@ -545,7 +545,7 @@ impl QuicklinkConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ConversionConfig {
     /// Hours before cached currency rates are considered stale and refreshed.
@@ -560,13 +560,13 @@ impl Default for ConversionConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SnippetsConfig {
     pub entries: Vec<SnippetConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SnippetConfig {
     /// Optional keyword that surfaces this snippet directly.
     #[serde(default)]
@@ -586,7 +586,7 @@ pub struct SnippetConfig {
 /// optionally Tab-accepted), the free text after it becomes the `{query}` /
 /// `{arg}` argument substituted into a template and run. Built-ins ship for
 /// `@term`, `@finder`, and `@safari`; users can define their own here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppCommandConfig {
     /// The `@`-prefixed trigger (stored WITHOUT the `@`, e.g. `term`).
     pub keyword: String,
@@ -605,7 +605,7 @@ pub struct AppCommandConfig {
     pub template: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommandConfig {
     pub name: String,
     #[serde(default)]
@@ -632,7 +632,7 @@ impl CommandConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiConfig {
     pub provider: String,
@@ -650,7 +650,7 @@ impl Default for AiConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub playful_placeholders: bool,
@@ -718,14 +718,34 @@ pub fn merged_app_commands(user: &[AppCommandConfig]) -> Vec<AppCommandConfig> {
     merged
 }
 
+/// Path to the on-disk config file.
+pub fn config_path() -> std::path::PathBuf {
+    support_file(CONFIG_FILE)
+}
+
 /// Load the config from disk, writing a commented default on first run.
 pub fn load() -> Config {
-    let path = support_file(CONFIG_FILE);
+    load_result().unwrap_or_default()
+}
+
+/// Load config, returning a parse error string on failure.
+pub fn load_result() -> Result<Config, String> {
+    let path = config_path();
     match std::fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+        Ok(contents) => toml::from_str(&contents).map_err(|e| format!("{e}")),
         Err(_) => {
             let _ = std::fs::write(&path, DEFAULT_CONFIG_TOML);
-            Config::default()
+            Ok(Config::default())
         }
     }
+}
+
+/// Serialize and atomically write config to disk.
+pub fn save(config: &Config) -> Result<(), String> {
+    let path = config_path();
+    let body = toml::to_string_pretty(config).map_err(|e| format!("{e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, body).map_err(|e| format!("{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("{e}"))?;
+    Ok(())
 }

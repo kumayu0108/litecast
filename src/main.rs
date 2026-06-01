@@ -1,15 +1,20 @@
 mod ai;
+mod app_shell;
+mod app_state;
 mod clipboard;
 mod color_pick;
 mod config;
 mod critters;
 mod currency;
 mod engine;
+mod engine_setup;
 mod frecency;
+mod hotkeys;
 mod menu_ax;
 mod menu_cache;
 mod model;
 mod paths;
+mod preferences;
 mod providers;
 mod screenshot;
 mod secrets;
@@ -17,13 +22,10 @@ mod target_pid;
 mod window;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Mutex};
 
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
+use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
@@ -49,21 +51,10 @@ use objc2_foundation::{
 
 use ai::ChatMsg;
 use clipboard::History;
-use config::{AiConfig, AppCommandConfig, CommandConfig, Config, HotkeyConfig};
-use currency::CurrencyCache;
-use engine::{fuzzy_score, Engine, Filter};
+use config::{AiConfig, AppCommandConfig};
+use engine::{fuzzy_score, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
-use providers::{
-    AiCommandsProvider, AiProvider, AppCommandsProvider, AppsProvider, BookmarksProvider,
-    CalcProvider, CalendarProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
-    ConvertersProvider, DateTimeProvider, DevToolsProvider, DictionaryProvider, EasterEggProvider,
-    EmojiProvider, FileActionsProvider, FilesProvider, MediaProvider, NetworkProvider,
-    ColorProvider, GitProvider, MenuProvider, NewFileProvider, NotesProvider, PluginProvider,
-    PomodoroProvider, ProcessProvider, ProgUtilsProvider, QuicklinksProvider, ScriptsProvider,
-    SnippetsProvider, SwitcherProvider, SystemProvider, TextTransformProvider, WebSearchProvider,
-    WindowProvider,
-};
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
@@ -333,12 +324,8 @@ struct Ivars {
     pending: PendingResults,
     /// Clipboard history shared with the watcher timer.
     clip_history: History,
-    /// Whether to capture images copied to the clipboard.
-    keep_images: bool,
     /// Last observed pasteboard change count.
     last_change: Cell<isize>,
-    /// AI backend configuration (provider/model/endpoint).
-    ai_config: AiConfig,
     /// Latest AI answer awaiting application on the main thread.
     ai_pending: AiPending,
     /// Monotonic AI request id; stale answers are discarded.
@@ -358,16 +345,12 @@ struct Ivars {
     screenshot_path: RefCell<Option<String>>,
     /// Captured screenshot path awaiting the main thread.
     shot_pending: Arc<Mutex<Option<String>>>,
-    /// Whether to rotate playful placeholder text.
-    playful_placeholders: bool,
     /// Rotating index into the playful placeholder list.
     placeholder_idx: Cell<usize>,
     /// Image view used for the wandering critter when GIFs are installed.
     critter_view: Retained<NSImageView>,
     /// Text-glyph critter used out of the box when no GIFs are installed.
     critter_label: Retained<NSTextField>,
-    /// Whether the wandering-critter feature is enabled (`[ui] critters`).
-    critters_enabled: bool,
     /// Loaded critter GIF images (empty = use the built-in glyph critter).
     critter_images: Vec<Retained<NSImage>>,
     /// Rotating index into the critter image list.
@@ -388,9 +371,7 @@ struct Ivars {
     /// commands target this app's focused window (since opening the panel makes
     /// litecast itself frontmost). -1 when unknown.
     prev_app_pid: Cell<i32>,
-    menu_enabled: bool,
-    color_max_recent: usize,
-    _hotkey_manager: GlobalHotKeyManager,
+    app_state: Arc<app_state::AppState>,
 }
 
 define_class!(
@@ -404,7 +385,10 @@ define_class!(
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
-        fn did_finish_launching(&self, _notification: &NSNotification) {}
+        fn did_finish_launching(&self, _notification: &NSNotification) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            app_shell::install(mtm, self as &AnyObject);
+        }
     }
 
     unsafe impl NSWindowDelegate for AppDelegate {
@@ -433,6 +417,30 @@ define_class!(
         #[unsafe(method(toggleFromHotkey))]
         fn toggle_from_hotkey(&self) {
             self.toggle();
+        }
+
+        #[unsafe(method(openPreferences:))]
+        fn open_preferences(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            let ptr = std::ptr::from_ref(self) as usize;
+            preferences::show(mtm, self.ivars().app_state.clone(), ptr);
+        }
+
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            preferences::show_about(mtm);
+        }
+
+        #[unsafe(method(quitApp:))]
+        fn quit_app(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            NSApplication::sharedApplication(mtm).terminate(None);
+        }
+
+        #[unsafe(method(applyConfigFromPreferences:))]
+        fn apply_config_from_preferences(&self, _cfg: Option<&AnyObject>) {
+            self.sync_runtime_from_config();
         }
 
         // One-shot safety net: guarantee the panel is fully opaque after the
@@ -529,7 +537,13 @@ define_class!(
             ivars.last_change.set(count);
             if let Some(text) = unsafe { pasteboard.stringForType(NSPasteboardTypeString) } {
                 ivars.clip_history.record(text.to_string());
-            } else if ivars.keep_images {
+            } else if ivars
+                .app_state
+                .config
+                .read()
+                .map(|c| c.clipboard.keep_images)
+                .unwrap_or(true)
+            {
                 // No text: capture an image off the pasteboard (if any).
                 if let Some(path) = save_pasteboard_image(&pasteboard, count) {
                     ivars.clip_history.record_image(path);
@@ -812,7 +826,13 @@ impl AppDelegate {
                 target_pid::set(pid);
             }
         }
-        if ivars.menu_enabled {
+        if ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.menu.enabled)
+            .unwrap_or(false)
+        {
             menu_cache::refresh(ivars.prev_app_pid.get(), 80);
         }
 
@@ -832,7 +852,14 @@ impl AppDelegate {
         self.layout(ivars.results.borrow().len(), false);
 
         // Rotate a playful placeholder (unless in screenshot mode).
-        if ivars.playful_placeholders && ivars.screenshot_path.borrow().is_none() {
+        if ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ui.playful_placeholders)
+            .unwrap_or(true)
+            && ivars.screenshot_path.borrow().is_none()
+        {
             let idx = ivars.placeholder_idx.get();
             ivars.placeholder_idx.set(idx.wrapping_add(1));
             let text = PLAYFUL_PLACEHOLDERS[idx % PLAYFUL_PLACEHOLDERS.len()];
@@ -886,6 +913,9 @@ impl AppDelegate {
             )
         };
     }
+
+    /// Called after Preferences saves; runtime reads go through `app_state.config`.
+    fn sync_runtime_from_config(&self) {}
 
     fn hide_and_reset(&self) {
         let ivars = self.ivars();
@@ -970,7 +1000,15 @@ impl AppDelegate {
                 )
             } else {
                 Item::new(
-                    format!("Ask {}: {prompt}", ivars.ai_config.provider),
+                    format!(
+                        "Ask {}: {prompt}",
+                        ivars
+                            .app_state
+                            .config
+                            .read()
+                            .map(|c| c.ai.provider.clone())
+                            .unwrap_or_else(|_| "ai".to_string())
+                    ),
                     "Press Enter to send the screenshot + question",
                     "AI",
                     0,
@@ -1352,7 +1390,13 @@ impl AppDelegate {
     }
 
     fn run_pick_color(&self) {
-        let max = self.ivars().color_max_recent;
+        let max = self
+            .ivars()
+            .app_state
+            .config
+            .read()
+            .map(|c| c.color.max_recent)
+            .unwrap_or(12);
         self.hide_and_reset();
         match color_pick::pick_color_interactive() {
             Ok(hex) => {
@@ -1440,7 +1484,12 @@ impl AppDelegate {
         self.ensure_panel_expanded();
         self.layout(1, false);
 
-        let config = ivars.ai_config.clone();
+        let config = ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ai.clone())
+            .unwrap_or_default();
         let pending = ivars.ai_pending.clone();
         let history = ivars.chat.borrow().clone();
         let delegate_addr = self as *const AppDelegate as usize;
@@ -1559,7 +1608,14 @@ impl AppDelegate {
     /// something always strolls across the panel out of the box.
     fn start_critter_walk(&self) {
         let ivars = self.ivars();
-        if !ivars.critters_enabled || !ivars.visible.get() {
+        if !ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ui.critters)
+            .unwrap_or(false)
+            || !ivars.visible.get()
+        {
             return;
         }
         let idx = ivars.critter_idx.get();
@@ -2712,209 +2768,12 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
 }
 
-/// Parse a hotkey combo like "Cmd+Shift+S" into a `HotKey`. Modifiers accept
-/// Cmd/Command/Super/Win, Ctrl/Control, Alt/Option/Opt, and Shift; the final
-/// token is the key. Requires at least one modifier (global hotkeys without one
-/// are a bad idea) and exactly one key. Returns `None` on anything unrecognized.
-fn parse_hotkey_combo(combo: &str) -> Option<HotKey> {
-    let mut mods = Modifiers::empty();
-    let mut code: Option<Code> = None;
-    for part in combo.split('+') {
-        let token = part.trim();
-        if token.is_empty() {
-            continue;
-        }
-        match token.to_ascii_lowercase().as_str() {
-            "cmd" | "command" | "super" | "win" | "meta" => mods |= Modifiers::META,
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "alt" | "option" | "opt" => mods |= Modifiers::ALT,
-            "shift" => mods |= Modifiers::SHIFT,
-            other => {
-                if code.is_some() {
-                    return None;
-                }
-                code = parse_key_code(other);
-                code?;
-            }
-        }
-    }
-    let code = code?;
-    if mods.is_empty() {
-        return None;
-    }
-    Some(HotKey::new(Some(mods), code))
-}
-
-/// Map a single key token (a letter, digit, or named key) to a `Code`.
-fn parse_key_code(token: &str) -> Option<Code> {
-    use Code::*;
-    let upper = token.to_ascii_uppercase();
-    Some(match upper.as_str() {
-        "A" => KeyA, "B" => KeyB, "C" => KeyC, "D" => KeyD, "E" => KeyE, "F" => KeyF,
-        "G" => KeyG, "H" => KeyH, "I" => KeyI, "J" => KeyJ, "K" => KeyK, "L" => KeyL,
-        "M" => KeyM, "N" => KeyN, "O" => KeyO, "P" => KeyP, "Q" => KeyQ, "R" => KeyR,
-        "S" => KeyS, "T" => KeyT, "U" => KeyU, "V" => KeyV, "W" => KeyW, "X" => KeyX,
-        "Y" => KeyY, "Z" => KeyZ,
-        "0" => Digit0, "1" => Digit1, "2" => Digit2, "3" => Digit3, "4" => Digit4,
-        "5" => Digit5, "6" => Digit6, "7" => Digit7, "8" => Digit8, "9" => Digit9,
-        "F1" => F1, "F2" => F2, "F3" => F3, "F4" => F4, "F5" => F5, "F6" => F6,
-        "F7" => F7, "F8" => F8, "F9" => F9, "F10" => F10, "F11" => F11, "F12" => F12,
-        "SPACE" => Space,
-        "ENTER" | "RETURN" => Enter,
-        "TAB" => Tab,
-        "ESC" | "ESCAPE" => Escape,
-        "UP" => ArrowUp,
-        "DOWN" => ArrowDown,
-        "LEFT" => ArrowLeft,
-        "RIGHT" => ArrowRight,
-        "MINUS" | "-" => Minus,
-        "EQUAL" | "=" => Equal,
-        "COMMA" | "," => Comma,
-        "PERIOD" | "." => Period,
-        "SLASH" | "/" => Slash,
-        "BACKSLASH" | "\\" => Backslash,
-        "SEMICOLON" | ";" => Semicolon,
-        "QUOTE" | "'" => Quote,
-        "BACKQUOTE" | "`" => Backquote,
-        "LEFTBRACKET" | "[" => BracketLeft,
-        "RIGHTBRACKET" | "]" => BracketRight,
-        _ => return None,
-    })
-}
-
-/// Resolve a `[[hotkeys]]` entry into the `Action` to run on press. For
-/// `kind = "command"`, the target names a `[[commands]]` entry, whose own
-/// kind/target define the action (with `{}` stripped, since a hotkey carries
-/// no argument).
-fn resolve_hotkey_action(hk: &HotkeyConfig, commands: &[CommandConfig]) -> Option<Action> {
-    match hk.kind.as_str() {
-        "open" => Some(Action::Open(hk.target.clone())),
-        "shell" => Some(Action::RunShell(hk.target.clone())),
-        "command" => {
-            let cmd = commands.iter().find(|c| c.name == hk.target)?;
-            let target = cmd.target.replace("{}", "");
-            Some(match cmd.kind.as_str() {
-                "shell" => Action::RunShell(target),
-                _ => Action::Open(target),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine {
-    let mut engine = Engine::new(frecency);
-    // EasterEgg is general fun: only shown when no filter is active.
-    engine.add(Box::new(EasterEggProvider), Filter::All);
-    engine.add(Box::new(AiProvider::new(config.ai.clone())), Filter::Ai);
-    engine.add(
-        Box::new(AiCommandsProvider::new(&config.ai, history.clone())),
-        Filter::Ai,
-    );
-    engine.add(Box::new(CalcProvider), Filter::Calc);
-    let currency = CurrencyCache::new(config.conversion.currency_ttl_hours);
-    // Warm the rate cache in the background so the first currency query is fast.
-    currency.refresh_async();
-    engine.add(Box::new(ConvertProvider::new(currency)), Filter::Calc);
-    // Developer tools, color/base/epoch converters, and date/time helpers all
-    // live under the Calc category (keyword-gated, idle-cheap).
-    engine.add(Box::new(DevToolsProvider), Filter::Calc);
-    engine.add(Box::new(ConvertersProvider), Filter::Calc);
-    engine.add(
-        Box::new(DateTimeProvider::new(config.datetime.pairs())),
-        Filter::Calc,
-    );
-    engine.add(Box::new(EmojiProvider), Filter::Emoji);
-    engine.add(Box::new(ClipboardProvider::new(history)), Filter::Clip);
-    // The "Commands" category groups user commands, quicklinks, snippets,
-    // plugins, and system actions.
-    engine.add(
-        Box::new(CommandsProvider::new(config.commands.clone())),
-        Filter::Cmd,
-    );
-    // App commands are `@keyword`-namespaced; `@` is not a category token, so
-    // the raw `@keyword arg` query reaches this provider under `All` (and Cmd).
-    let app_commands = config::merged_app_commands(&config.app_commands);
-    engine.add(
-        Box::new(AppCommandsProvider::new(
-            app_commands.clone(),
-            config.web_search_url.clone(),
-        )),
-        Filter::All,
-    );
-    engine.add(
-        Box::new(AppCommandsProvider::new(
-            app_commands,
-            config.web_search_url.clone(),
-        )),
-        Filter::Cmd,
-    );
-    engine.add(
-        Box::new(QuicklinksProvider::new(config.quicklinks.clone())),
-        Filter::Cmd,
-    );
-    engine.add(
-        Box::new(SnippetsProvider::new(config.snippets.entries.clone())),
-        Filter::Cmd,
-    );
-    // Script commands: executable scripts in the watched dir, parsed lazily and
-    // cached (re-scanned only when the directory's mtime changes).
-    engine.add(
-        Box::new(ScriptsProvider::new(&config.scripts.dir)),
-        Filter::Cmd,
-    );
-    engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
-    engine.add(Box::new(GitProvider::new(config.git.clone())), Filter::Cmd);
-    engine.add(Box::new(TextTransformProvider), Filter::Cmd);
-    engine.add(Box::new(ProgUtilsProvider), Filter::Cmd);
-    engine.add(Box::new(PomodoroProvider::new(config.pomodoro.clone())), Filter::Cmd);
-    engine.add(Box::new(NewFileProvider::new(config.newfile.clone())), Filter::Cmd);
-    engine.add(Box::new(ColorProvider::new(config.color.clone())), Filter::Calc);
-    if config.menu.enabled {
-        engine.add(Box::new(MenuProvider::new(config.menu.clone())), Filter::Cmd);
-    }
-    // Window/tab switcher: keyword-gated (`windows`/`switch`/`tabs`); listing is
-    // cached briefly and only runs osascript on a keyword match.
-    engine.add(Box::new(SwitcherProvider::new()), Filter::Cmd);
-    // Window management is opt-in (needs Accessibility); only surface its
-    // commands when explicitly enabled in the config.
-    if config.window.enabled {
-        engine.add(Box::new(WindowProvider::new()), Filter::Cmd);
-    }
-    engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
-    // Process manager: keyword-gated (`kill`/`ps`); kills go through a confirm.
-    engine.add(Box::new(ProcessProvider::new()), Filter::Cmd);
-    // Keyword-gated utility providers (calendar/network/notes/dictionary/media).
-    // Each returns immediately unless its keyword matches, so they stay cheap on
-    // the default path; the ones that shell out only do so on a match.
-    engine.add(Box::new(CalendarProvider::new()), Filter::Cmd);
-    engine.add(Box::new(NetworkProvider::new()), Filter::Cmd);
-    engine.add(
-        Box::new(NotesProvider::new(
-            &config.notes.file,
-            config.notes.apple_notes,
-        )),
-        Filter::Cmd,
-    );
-    engine.add(Box::new(DictionaryProvider::new()), Filter::Cmd);
-    engine.add(Box::new(MediaProvider), Filter::Cmd);
-    engine.add(Box::new(AppsProvider::new()), Filter::Apps);
-    engine.add(Box::new(FilesProvider::new()), Filter::Files);
-    // File power actions + recent files/downloads (keyword-gated).
-    engine.add(Box::new(FileActionsProvider), Filter::Files);
-    engine.add(Box::new(BookmarksProvider::new()), Filter::Web);
-    engine.add(
-        Box::new(WebSearchProvider::new(config.web_search_url.clone())),
-        Filter::Web,
-    );
-    engine
-}
-
 fn main() {
     eprintln!("[litecast] starting...");
+    let open_prefs = std::env::args().any(|a| a == "--preferences" || a == "-preferences");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     let views = build_panel(mtm);
     let PanelViews {
@@ -2947,74 +2806,18 @@ fn main() {
         Vec::new()
     };
 
-    let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
-    // Toggle/screenshot combos are configurable via `[hotkey]`; fall back to the
-    // built-in Option+Space / Option+Shift+Space when unset or unparseable.
-    let toggle_hotkey = parse_hotkey_combo(&config.hotkey.toggle).unwrap_or_else(|| {
-        if !config.hotkey.toggle.is_empty() {
-            eprintln!(
-                "[litecast] invalid [hotkey] toggle {:?}; using Option+Space",
-                config.hotkey.toggle
-            );
-        }
-        HotKey::new(Some(Modifiers::ALT), Code::Space)
-    });
-    let shot_hotkey = parse_hotkey_combo(&config.hotkey.screenshot).unwrap_or_else(|| {
-        if !config.hotkey.screenshot.is_empty() {
-            eprintln!(
-                "[litecast] invalid [hotkey] screenshot {:?}; using Option+Shift+Space",
-                config.hotkey.screenshot
-            );
-        }
-        HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
-    });
-    if let Err(e) = manager.register(toggle_hotkey) {
-        eprintln!(
-            "[litecast] failed to register toggle hotkey {}: {e}",
-            config.hotkey.toggle
-        );
-    }
-    if let Err(e) = manager.register(shot_hotkey) {
-        eprintln!(
-            "[litecast] failed to register screenshot hotkey {}: {e}",
-            config.hotkey.screenshot
-        );
-    }
-    eprintln!(
-        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
-        config.hotkey.toggle
-    );
-    let toggle_id = toggle_hotkey.id();
-    let shot_id = shot_hotkey.id();
-
-    // User-defined global hotkeys from `[[hotkeys]]`. Each binds a key combo to
-    // an action (open/shell/named command). Registration is best-effort and
-    // non-fatal, mirroring the built-in hotkeys above.
-    let mut hotkey_actions: HashMap<u32, Action> = HashMap::new();
-    for hk in &config.hotkeys {
-        let Some(parsed) = parse_hotkey_combo(&hk.key) else {
-            eprintln!("[litecast] skipping hotkey with invalid combo: {:?}", hk.key);
-            continue;
-        };
-        let Some(action) = resolve_hotkey_action(hk, &config.commands) else {
-            eprintln!(
-                "[litecast] skipping hotkey {:?}: unknown kind/target ({}: {})",
-                hk.key, hk.kind, hk.target
-            );
-            continue;
-        };
-        match manager.register(parsed) {
-            Ok(()) => {
-                hotkey_actions.insert(parsed.id(), action);
-            }
-            Err(e) => eprintln!("[litecast] failed to register custom hotkey {}: {e}", hk.key),
-        }
-    }
-
     let (query_tx, query_rx) = mpsc::channel::<(u64, String, Filter)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50, config.clipboard.max_images);
     let frecency = Frecency::load();
+    let app_state = Arc::new(
+        app_state::AppState::new(config.clone(), history.clone(), frecency.clone())
+            .unwrap_or_else(|e| panic!("hotkey setup failed: {e}")),
+    );
+    eprintln!(
+        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
+        config.hotkey.toggle
+    );
 
     let ivars = Ivars {
         panel,
@@ -3034,9 +2837,7 @@ fn main() {
         chips,
         pending: pending.clone(),
         clip_history: history.clone(),
-        keep_images: config.clipboard.keep_images,
         last_change: Cell::new(-1),
-        ai_config: config.ai.clone(),
         ai_pending: Arc::new(Mutex::new(None)),
         ai_generation: Cell::new(0),
         chat: RefCell::new(Vec::new()),
@@ -3045,9 +2846,7 @@ fn main() {
         last_ai: RefCell::new(None),
         screenshot_path: RefCell::new(None),
         shot_pending: Arc::new(Mutex::new(None)),
-        playful_placeholders: config.ui.playful_placeholders,
         placeholder_idx: Cell::new(0),
-        critters_enabled: config.ui.critters,
         critter_view: critter,
         critter_label,
         critter_images,
@@ -3057,9 +2856,7 @@ fn main() {
         suppress_ghost: Cell::new(false),
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
-        menu_enabled: config.menu.enabled,
-        color_max_recent: config.color.max_recent,
-        _hotkey_manager: manager,
+        app_state: app_state.clone(),
     };
 
     let delegate: Retained<AppDelegate> = {
@@ -3096,7 +2893,7 @@ fn main() {
     // sources like mdfind never block typing) and signals the main thread when
     // results are ready. Blocks on recv when idle, so it uses zero CPU.
     {
-        let engine = Arc::new(build_engine(history.clone(), &config, frecency.clone()));
+        let engine = app_state.engine.clone();
         let pending = pending.clone();
         std::thread::spawn(move || {
             while let Ok((mut generation, mut query, mut filter)) = query_rx.recv() {
@@ -3106,7 +2903,10 @@ fn main() {
                     query = q;
                     filter = f;
                 }
-                let items = engine.query(&query, filter);
+                let items = engine
+                    .read()
+                    .map(|e| e.query(&query, filter))
+                    .unwrap_or_default();
                 if let Ok(mut slot) = pending.lock() {
                     *slot = Some((generation, items));
                 }
@@ -3125,22 +2925,22 @@ fn main() {
     }
 
     // Hotkey listener: blocks when idle (zero CPU) and bounces onto the main thread.
+    let hotkey_ids = app_state.hotkey_ids.clone();
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            // Custom hotkeys map directly to an Action (open/shell). These only
-            // spawn subprocesses, so they run here without touching the main
-            // thread or the panel.
-            if let Some(action) = hotkey_actions.get(&event.id) {
+            let ids = hotkey_ids.lock().ok();
+            let Some(ids) = ids else { continue };
+            if let Some(action) = ids.custom.get(&event.id) {
                 action.execute();
                 continue;
             }
-            let selector = if event.id == shot_id {
+            let selector = if event.id == ids.screenshot {
                 sel!(captureScreenshot)
-            } else if event.id == toggle_id {
+            } else if event.id == ids.toggle {
                 sel!(toggleFromHotkey)
             } else {
                 continue;
@@ -3182,6 +2982,10 @@ fn main() {
             true,
         )
     };
+
+    if open_prefs {
+        preferences::show(mtm, app_state, delegate_addr);
+    }
 
     app.run();
 }

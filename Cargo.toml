@@ -88,6 +88,13 @@ features = [
     "NSAnimationContext",
     "NSTrackingArea",
     "NSAppearance",
+    "NSTabView",
+    "NSTabViewItem",
+    "NSToolbar",
+    "NSToolbarItem",
+    "NSPopUpButton",
+    "NSOpenPanel",
+    "NSAlert",
 ]
 
 [profile.release]

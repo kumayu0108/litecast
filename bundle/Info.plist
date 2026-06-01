@@ -18,9 +18,9 @@
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <!-- Background/accessory app: no Dock icon, no menu bar. -->
+    <!-- Regular app: Dock icon + menu bar extra for Settings. -->
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
