@@ -1,11 +1,32 @@
+<p align="center">
+  <img src="assets/litecast-logo.png" alt="litecast logo" width="128" height="128">
+</p>
+
 # litecast
 
 A super-lightweight, native keyboard launcher for macOS, written in Rust.
 
-litecast runs as a background menu-bar / accessory app (no Dock icon) and pops up a
-borderless search panel on a global hotkey. It is built directly on AppKit via
+litecast shows a Dock icon and a menu-bar extra, and pops up a borderless search
+panel on a global hotkey. It is built directly on AppKit via
 [`objc2`](https://crates.io/crates/objc2) (no web view, no cross-platform UI toolkit),
-so it stays fast and lean.
+so it stays fast and lean. The launcher-first workflow is unchanged: the hotkey still
+toggles the panel; the Dock icon and menu bar are there for discoverability and Settings.
+
+## Screenshots
+
+The borderless search launcher with category filters and a web-search fallback:
+
+![litecast launcher panel with category filters and a web-search result](assets/screenshot-launcher.png)
+
+The native, resizable Settings window — a tabbed sidebar covering every config
+section, with per-setting help captions:
+
+![litecast Settings window showing the General tab](assets/screenshot-settings.png)
+
+The same Settings window with the sidebar layout and the App commands section
+selected:
+
+![litecast Settings sidebar with the App commands section](assets/screenshot-app-commands.png)
 
 ## Goals
 
@@ -49,6 +70,7 @@ so it stays fast and lean.
 - Multi-turn AI follow-up chat and quick AI commands (translate / summarize / fix grammar / improve).
 - Screenshot capture sent to an AI vision model.
 - Small, opt-out UI delights (playful placeholders, fade-in, easter eggs, wandering critters).
+- Native, resizable Settings window with a sidebar, in-app help for every setting, a hotkey recorder, and an opt-in "Launch at login".
 
 ## Hotkeys
 
@@ -61,7 +83,8 @@ so it stays fast and lean.
 
 ### Changing the toggle hotkey (and using Cmd + Space)
 
-The toggle and screenshot combos are configurable in `config.toml`:
+The easiest way is in **Settings → Hotkeys**: click the **Toggle panel** recorder,
+press your combo, and **Save**. You can also edit `config.toml` directly:
 
 ```toml
 [hotkey]
@@ -85,6 +108,47 @@ You can also define your own global hotkeys in the config via `[[hotkeys]]` (see
 [Custom global hotkeys](docs/features.md#custom-global-hotkeys) for the combo
 syntax), each bound to open a URL/app, run a shell command, or fire a named
 command — without opening the panel.
+
+## Settings
+
+litecast ships with a native Preferences window that edits every section of the
+config. Open it from the **litecast** app menu → **Settings…** (`⌘,`), from the
+menu-bar extra → **Settings…**, or from a terminal with:
+
+```bash
+litecast --preferences
+```
+
+The window has a **sidebar** listing every config section — **General**,
+**Hotkeys**, **AI**, **Commands**, **App commands**, **Quicklinks**, **Snippets**,
+**Clipboard**, **Conversion**, **Window**, **Menu**, **Notes**, **Date & time**,
+**Scripts**, **Git**, **New file**, **Pomodoro**, and **Color** — so all sections
+are always reachable (click one to switch panes). The window is **resizable**
+(drag any edge); the sidebar and content pane grow with it, and tall sections
+scroll. Under each setting there is a short **gray help caption** explaining what
+the field does and giving example values.
+
+Highlights:
+
+- **Launch litecast at login** (General): a checkbox that registers a per-user
+  LaunchAgent so litecast starts automatically after you log in. The checkbox
+  reflects the real current state when the window opens, and toggling it takes
+  effect immediately (applies on the next login).
+- **Hotkey recorder** (Hotkeys): click the **Toggle panel** or **Screenshot**
+  recorder and press your combo (e.g. ⌘Space). It captures and displays the
+  shortcut. If a combo can't be registered (already owned by another app, e.g.
+  Spotlight owns ⌘Space), Save shows an inline warning telling you how to free it.
+
+Editing a value and pressing **Save** applies it immediately — the query engine is
+rebuilt and global hotkeys are re-registered without restarting the app. **Cancel**
+reverts the in-memory draft, **Open config folder** reveals the config in Finder,
+and **Reload from disk** re-reads `config.toml` if you edited it externally.
+
+> **Note:** the source of truth is still
+> `~/Library/Application Support/litecast/config.toml`. Saving from Preferences
+> rewrites that file via `toml`, which does **not** preserve inline `#` comments.
+> API keys are never written to the TOML — they stay in the macOS Keychain (set them
+> with `setkey` / `setup` in the launcher).
 
 ## Usage
 
@@ -240,8 +304,25 @@ open target/litecast.app
 
 Requires a recent stable Rust toolchain (1.85+) and macOS 11+.
 
-Because the app is not notarized, Gatekeeper will block the first launch.
-Right-click `litecast.app` and choose **Open**, then confirm.
+> **Build from a normal terminal.** If your shell exports `CARGO_TARGET_DIR`
+> (some sandboxed/agent environments do), cargo and `bundle.sh` will build into
+> that cache instead of `./target`, which can pick up a stale binary. Run
+> `env -u CARGO_TARGET_DIR ./scripts/bundle.sh` (and likewise for `cargo build`)
+> to force a real build into `./target`.
+
+First launch / quick start:
+
+1. Run `./scripts/bundle.sh`, then `open target/litecast.app`. Because the app is
+   not notarized, Gatekeeper blocks the first launch — **right-click
+   `litecast.app` and choose Open**, then confirm. (You only do this once.)
+2. Press **Option + Space** to toggle the launcher panel. (Change it any time in
+   Settings → Hotkeys.)
+3. Open **Settings** from the menu-bar **⌘** icon → **Settings…**, or the
+   **litecast** app menu → **Settings…** (`⌘,`).
+4. To enable AI features, open the panel and type **`setup`**, then
+   **`setkey <your-api-key>`** — the key is stored in the macOS Keychain (see
+   *Getting started* above).
+5. Optional: in **Settings → General**, turn on **Launch litecast at login**.
 
 ### Keychain prompts & code signing
 

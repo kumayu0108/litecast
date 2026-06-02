@@ -1,15 +1,22 @@
 mod ai;
+mod app_shell;
+mod app_state;
 mod clipboard;
 mod color_pick;
 mod config;
 mod critters;
 mod currency;
+mod debug_log;
 mod engine;
+mod engine_setup;
 mod frecency;
+mod hotkeys;
+mod login_item;
 mod menu_ax;
 mod menu_cache;
 mod model;
 mod paths;
+mod preferences;
 mod providers;
 mod screenshot;
 mod secrets;
@@ -17,22 +24,20 @@ mod target_pid;
 mod window;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Mutex};
 
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
+use objc2::{class, define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSBackingStoreType,
     NSAnimationContext, NSBezelStyle, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox,
     NSBoxType, NSButton, NSButtonType,
-    NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
-    NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSPanel, NSPasteboard,
+    NSColor, NSControl, NSEvent, NSEventMask, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
+    NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSLayoutConstraint, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableHeaderView,
     NSTableRowView, NSTableView,
@@ -42,28 +47,17 @@ use objc2_app_kit::{
     NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSData, NSDictionary, NSEdgeInsets, NSIndexSet,
+    MainThreadMarker, NSArray, NSAttributedString, NSData, NSDictionary, NSEdgeInsets, NSIndexSet,
     NSNotification, NSNumber, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
     NSTimer,
 };
 
 use ai::ChatMsg;
 use clipboard::History;
-use config::{AiConfig, AppCommandConfig, CommandConfig, Config, HotkeyConfig};
-use currency::CurrencyCache;
-use engine::{fuzzy_score, Engine, Filter};
+use config::AppCommandConfig;
+use engine::{fuzzy_score, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
-use providers::{
-    AiCommandsProvider, AiProvider, AppCommandsProvider, AppsProvider, BookmarksProvider,
-    CalcProvider, CalendarProvider, ClipboardProvider, CommandsProvider, ConvertProvider,
-    ConvertersProvider, DateTimeProvider, DevToolsProvider, DictionaryProvider, EasterEggProvider,
-    EmojiProvider, FileActionsProvider, FilesProvider, MediaProvider, NetworkProvider,
-    ColorProvider, GitProvider, MenuProvider, NewFileProvider, NotesProvider, PluginProvider,
-    PomodoroProvider, ProcessProvider, ProgUtilsProvider, QuicklinksProvider, ScriptsProvider,
-    SnippetsProvider, SwitcherProvider, SystemProvider, TextTransformProvider, WebSearchProvider,
-    WindowProvider,
-};
 
 type PendingResults = Arc<Mutex<Option<(u64, Vec<Item>)>>>;
 type AiPending = Arc<Mutex<Option<(u64, Result<String, String>)>>>;
@@ -142,7 +136,7 @@ const MAX_RESULTS_H: f64 = MAX_VISIBLE_ROWS as f64 * ROW_H;
 // Session-only recents ring buffer capacity (in-memory, reset on quit).
 const RECENTS_CAP: usize = 12;
 const ROW_ICON: f64 = 26.0;
-const CORNER_RADIUS: f64 = 20.0;
+const CORNER_RADIUS: f64 = 28.0;
 // Shared left/right margin for the search field, separator, and result rows so
 // everything aligns on a common edge.
 const SIDE_INSET: f64 = 22.0;
@@ -304,15 +298,15 @@ struct ShortcutEntry {
 struct Ivars {
     panel: Retained<LcPanel>,
     search: Retained<NSTextField>,
-    /// Menu-material vibrancy behind chips and results (hidden until expanded).
+    /// Single Menu-material vibrancy surface for the whole panel (search area,
+    /// chips, and results). Always visible; the chrome elements are simply
+    /// shown/hidden so the panel reads as one continuous Spotlight-style surface.
     panel_shell: Retained<NSVisualEffectView>,
-    /// Whether the full panel chrome (shell, chips, results band) is visible.
+    /// Whether the full panel chrome (chips, results band) is visible.
     panel_expanded: Cell<bool>,
-    /// Rounded "pill" background behind the search field (Spotlight-style).
-    /// A frosted vibrancy view so the field reads as a solid floating box even
-    /// when the panel is collapsed (no see-through to the desktop).
-    search_bg: Retained<NSVisualEffectView>,
-    /// Leading magnifier glyph inside the search pill.
+    /// Leading magnifier glyph in the search area. A DIRECT subview of the root
+    /// content view (same coordinate space as the results scrollview, chips, and
+    /// separator). Reframed by manual `setFrame` every `layout` pass.
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
@@ -333,12 +327,8 @@ struct Ivars {
     pending: PendingResults,
     /// Clipboard history shared with the watcher timer.
     clip_history: History,
-    /// Whether to capture images copied to the clipboard.
-    keep_images: bool,
     /// Last observed pasteboard change count.
     last_change: Cell<isize>,
-    /// AI backend configuration (provider/model/endpoint).
-    ai_config: AiConfig,
     /// Latest AI answer awaiting application on the main thread.
     ai_pending: AiPending,
     /// Monotonic AI request id; stale answers are discarded.
@@ -358,16 +348,12 @@ struct Ivars {
     screenshot_path: RefCell<Option<String>>,
     /// Captured screenshot path awaiting the main thread.
     shot_pending: Arc<Mutex<Option<String>>>,
-    /// Whether to rotate playful placeholder text.
-    playful_placeholders: bool,
     /// Rotating index into the playful placeholder list.
     placeholder_idx: Cell<usize>,
     /// Image view used for the wandering critter when GIFs are installed.
     critter_view: Retained<NSImageView>,
     /// Text-glyph critter used out of the box when no GIFs are installed.
     critter_label: Retained<NSTextField>,
-    /// Whether the wandering-critter feature is enabled (`[ui] critters`).
-    critters_enabled: bool,
     /// Loaded critter GIF images (empty = use the built-in glyph critter).
     critter_images: Vec<Retained<NSImage>>,
     /// Rotating index into the critter image list.
@@ -388,9 +374,10 @@ struct Ivars {
     /// commands target this app's focused window (since opening the panel makes
     /// litecast itself frontmost). -1 when unknown.
     prev_app_pid: Cell<i32>,
-    menu_enabled: bool,
-    color_max_recent: usize,
-    _hotkey_manager: GlobalHotKeyManager,
+    app_state: Arc<app_state::AppState>,
+    /// Keeps Carbon global hotkeys alive for the delegate lifetime (must not live
+    /// only in AppState — that regressed Option+Space after the settings shell work).
+    _hotkey_manager: RefCell<Option<GlobalHotKeyManager>>,
 }
 
 define_class!(
@@ -404,7 +391,90 @@ define_class!(
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
-        fn did_finish_launching(&self, _notification: &NSNotification) {}
+        fn did_finish_launching(&self, _notification: &NSNotification) {
+            // DEBUG-TEMP: prove whether the delegate callback is ever invoked.
+            debug_log::log(
+                "applicationDidFinishLaunching",
+                "ENTER",
+                r#"{"note":"delegate callback fired"}"#,
+            );
+            let mtm = MainThreadMarker::new().expect("main thread");
+            app_shell::install(mtm, self as &AnyObject);
+            // DEBUG-TEMP: Regular activation policy needs a live app event target.
+            self.ensure_hotkeys_registered("applicationDidFinishLaunching");
+            // A GUI launch of the .app bundle (Finder/Apps/Dock) should open the
+            // Settings window, matching the user's expectation that launching the
+            // listed app shows its settings. A bare terminal run of the debug
+            // binary does NOT auto-open settings, so devs can exercise the
+            // Option+Space launcher without the window getting in the way.
+            if launched_from_app_bundle() {
+                debug_log::log(
+                    "applicationDidFinishLaunching",
+                    "launch path decided: settings (.app bundle GUI launch)",
+                    "{}",
+                );
+                activation_present_settings(self, "applicationDidFinishLaunching");
+            } else {
+                debug_log::log(
+                    "applicationDidFinishLaunching",
+                    "launch path decided: launcher (terminal/dev run; no auto-open)",
+                    "{}",
+                );
+            }
+            debug_log::log("applicationDidFinishLaunching", "EXIT", "{}");
+        }
+
+        /// Dock icon click (or Finder "Reopen") while the app is already running.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(
+            &self,
+            _sender: &NSApplication,
+            has_visible_windows: bool,
+        ) -> bool {
+            debug_log::log(
+                "applicationShouldHandleReopen",
+                "Dock/Finder reopen",
+                &format!(
+                    r#"{{"has_visible_windows":{has_visible_windows},"panel_visible":{}}}"#,
+                    self.ivars().visible.get(),
+                ),
+            );
+            // Standard macOS behavior: clicking the Dock icon (or Finder "Reopen")
+            // shows the app's main window — here that is the Settings window. We do
+            // NOT pop the search launcher; that is reserved for Option+Space and
+            // the menu-bar "Open litecast" item.
+            debug_log::log(
+                "applicationShouldHandleReopen",
+                "launch path decided: settings (Dock/Finder reopen)",
+                "{}",
+            );
+            activation_present_settings(self, "applicationShouldHandleReopen");
+            true
+        }
+
+        /// Finder/.app launch or Cmd+Tab back to litecast (not used for bare CLI runs).
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            debug_log::log(
+                "applicationDidBecomeActive",
+                "app activated",
+                &format!(
+                    r#"{{"panel_visible":{},"app_bundle":{}}}"#,
+                    self.ivars().visible.get(),
+                    launched_from_app_bundle(),
+                ),
+            );
+            // Intentionally do NOT present any window here. The GUI-launch case is
+            // handled once in applicationDidFinishLaunching (opens Settings) and
+            // Dock reopens are handled in applicationShouldHandleReopen. Presenting
+            // here would both double-pop a window on first launch and annoyingly
+            // re-open a window on every Cmd+Tab back into the app.
+            debug_log::log(
+                "applicationDidBecomeActive",
+                "no auto-present (handled by finishLaunching / reopen)",
+                "{}",
+            );
+        }
     }
 
     unsafe impl NSWindowDelegate for AppDelegate {
@@ -429,10 +499,53 @@ define_class!(
     }
 
     impl AppDelegate {
+        // DEBUG-TEMP: fired once shortly after run() starts; proves the main run
+        // loop is alive and dispatching timers/selectors.
+        #[unsafe(method(runLoopProbe))]
+        fn run_loop_probe(&self) {
+            debug_log::log(
+                "runLoopProbe",
+                "main run loop is pumping",
+                r#"{"note":"timers + performSelectorOnMainThread will be delivered"}"#,
+            );
+        }
+
         // Invoked on the main thread from the hotkey listener thread.
         #[unsafe(method(toggleFromHotkey))]
         fn toggle_from_hotkey(&self) {
+            // DEBUG-TEMP
+            debug_log::log(
+                "toggleFromHotkey",
+                "selector on main thread",
+                &format!(r#"{{"visible_before":{}}}"#, self.ivars().visible.get()),
+            );
             self.toggle();
+        }
+
+        #[unsafe(method(openPreferences:))]
+        fn open_preferences(&self, _sender: Option<&AnyObject>) {
+            // DEBUG-TEMP
+            debug_log::log("openPreferences:", "menu item clicked", "{}");
+            let mtm = MainThreadMarker::new().expect("main thread");
+            let ptr = std::ptr::from_ref(self) as usize;
+            preferences::show(mtm, self.ivars().app_state.clone(), ptr);
+        }
+
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            preferences::show_about(mtm);
+        }
+
+        #[unsafe(method(quitApp:))]
+        fn quit_app(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            NSApplication::sharedApplication(mtm).terminate(None);
+        }
+
+        #[unsafe(method(applyConfigFromPreferences:))]
+        fn apply_config_from_preferences(&self, _cfg: Option<&AnyObject>) {
+            self.sync_runtime_from_config();
         }
 
         // One-shot safety net: guarantee the panel is fully opaque after the
@@ -445,9 +558,45 @@ define_class!(
             }
         }
 
+        // One-shot safety net: re-assert key window + search-field focus on the
+        // runloop turn AFTER show(). Fixes the "panel appears over Mission
+        // Control but won't accept typing" case: by the time this fires the
+        // system has dismissed Mission Control, so the panel can finally become
+        // key and the field editor receives keystrokes. No-op if already hidden.
+        #[unsafe(method(ensurePanelKey))]
+        fn ensure_panel_key(&self) {
+            let ivars = self.ivars();
+            if !ivars.visible.get() {
+                return;
+            }
+            let app = NSApplication::sharedApplication(self.mtm());
+            app.activate();
+            let is_key: bool = unsafe { msg_send![&*ivars.panel, isKeyWindow] };
+            if !is_key {
+                ivars.panel.orderFrontRegardless();
+                unsafe {
+                    let _: () = msg_send![&*ivars.panel, makeKeyWindow];
+                }
+            }
+            focus_search_field(&ivars.panel, &ivars.search);
+        }
+
         // NSSearchField text changed: dispatch the query to the worker thread.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, _notification: &NSNotification) {
+            // DEBUG-TEMP
+            let ivars = self.ivars();
+            let q = ivars.search.stringValue().to_string();
+            debug_log::log(
+                "controlTextDidChange",
+                "entry",
+                &format!(
+                    r#"{{"query_len":{},"expanded":{},"visible":{}}}"#,
+                    q.len(),
+                    ivars.panel_expanded.get(),
+                    ivars.visible.get(),
+                ),
+            );
             self.dispatch_query();
         }
 
@@ -529,7 +678,13 @@ define_class!(
             ivars.last_change.set(count);
             if let Some(text) = unsafe { pasteboard.stringForType(NSPasteboardTypeString) } {
                 ivars.clip_history.record(text.to_string());
-            } else if ivars.keep_images {
+            } else if ivars
+                .app_state
+                .config
+                .read()
+                .map(|c| c.clipboard.keep_images)
+                .unwrap_or(true)
+            {
                 // No text: capture an image off the pasteboard (if any).
                 if let Some(path) = save_pasteboard_image(&pasteboard, count) {
                     ivars.clip_history.record_image(path);
@@ -685,8 +840,129 @@ define_class!(
 );
 
 impl AppDelegate {
+    /// Register global hotkeys once the NSApplication event target is live.
+    fn ensure_hotkeys_registered(&self, reason: &str) {
+        self.register_hotkeys(reason, false);
+    }
+
+    /// Register or replace global hotkeys. When `replace` is false, skips if already
+    /// registered. When `replace` is true, swaps in a new manager only on success so
+    /// a failed prefs save cannot leave the app with no hotkeys.
+    fn register_hotkeys(&self, reason: &str, replace: bool) {
+        let ivars = self.ivars();
+        if !replace && ivars._hotkey_manager.borrow().is_some() {
+            // DEBUG-TEMP
+            debug_log::log(
+                "register_hotkeys",
+                "skip (already registered)",
+                &format!(r#"{{"reason":"{reason}"}}"#),
+            );
+            return;
+        }
+        let cfg = match ivars.app_state.config.read() {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                eprintln!("[litecast] hotkey registration skipped: config read failed: {e}");
+                debug_log::log(
+                    "register_hotkeys",
+                    "config read failed",
+                    &format!(r#"{{"reason":"{reason}","error":"{e}"}}"#),
+                );
+                return;
+            }
+        };
+
+        // CRITICAL: drop the existing GlobalHotKeyManager BEFORE creating a new
+        // one. Each manager installs a Carbon event handler / registers the
+        // combos; if the old one is still alive when we build the replacement,
+        // creating the new manager (or re-registering the same combo) fails with
+        // "Resource temporarily unavailable (os error 35)". Setting the slot to
+        // None here runs Drop, releasing the Carbon handler and unregistering the
+        // old hotkeys, so the fresh manager starts from a clean slate.
+        let had_previous = ivars._hotkey_manager.borrow().is_some();
+        *ivars._hotkey_manager.borrow_mut() = None;
+
+        match hotkeys::register_all(&cfg) {
+            Ok((manager, ids)) => {
+                if let Ok(mut slot) = ivars.app_state.last_hotkey_error.lock() {
+                    *slot = None;
+                }
+                // DEBUG-TEMP
+                debug_log::log(
+                    "register_hotkeys",
+                    "success",
+                    &format!(
+                        r#"{{"reason":"{reason}","replace":{replace},"toggle_combo":"{}","toggle_id":{},"screenshot_id":{}}}"#,
+                        cfg.hotkey.toggle, ids.toggle, ids.screenshot,
+                    ),
+                );
+                *ivars._hotkey_manager.borrow_mut() = Some(manager);
+                match ivars.app_state.hotkey_ids.lock() {
+                    Ok(mut slot) => *slot = ids,
+                    Err(e) => {
+                        eprintln!(
+                            "[litecast] hotkeys registered but hotkey_ids update failed: {e}"
+                        );
+                        debug_log::log(
+                            "register_hotkeys",
+                            "hotkey_ids lock failed",
+                            &format!(r#"{{"reason":"{reason}"}}"#),
+                        );
+                    }
+                }
+                if reason == "applicationDidFinishLaunching"
+                    || reason == "main:post_finishLaunching"
+                {
+                    eprintln!(
+                        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
+                        cfg.hotkey.toggle
+                    );
+                } else if replace {
+                    eprintln!(
+                        "[litecast] global hotkeys updated ({} to toggle)",
+                        cfg.hotkey.toggle
+                    );
+                }
+            }
+            Err(e) => {
+                let msg = format!(
+                    "Couldn't register the global hotkeys.\n\n{e}\n\nLikely causes:\n\u{2022} The shortcut is already in use by another app — for example \u{2318}Space is owned by Spotlight by default. Free it in System Settings \u{25b8} Keyboard \u{25b8} Keyboard Shortcuts, then try again, or pick another combo.\n\u{2022} Another copy of litecast may already be running and holding the shortcut. Quit the other instance (menu bar \u{2318} \u{25b8} Quit) and Save again.\n\nThe launcher hotkey is not active until this is resolved; you can still open litecast from the menu bar \u{2318} icon."
+                );
+                if let Ok(mut slot) = ivars.app_state.last_hotkey_error.lock() {
+                    *slot = Some(msg);
+                }
+                eprintln!("[litecast] failed to register global hotkeys ({reason}): {e}");
+                if had_previous {
+                    eprintln!(
+                        "[litecast] previous hotkey bindings were released; no hotkeys are active until re-registration succeeds"
+                    );
+                } else {
+                    eprintln!(
+                        "[litecast] launcher will not respond to {}; use the menu bar item instead",
+                        cfg.hotkey.toggle
+                    );
+                }
+                // DEBUG-TEMP
+                debug_log::log(
+                    "register_hotkeys",
+                    "register_all failed",
+                    &format!(r#"{{"reason":"{reason}","replace":{replace},"had_previous":{had_previous},"error":"{e}"}}"#),
+                );
+            }
+        }
+    }
+
     fn toggle(&self) {
         let visible = self.ivars().visible.get();
+        // DEBUG-TEMP
+        debug_log::log(
+            "toggle",
+            "called",
+            &format!(
+                r#"{{"visible_before":{visible},"will":"{}"}}"#,
+                if visible { "hide" } else { "show" },
+            ),
+        );
         if visible {
             self.hide_and_reset();
         } else {
@@ -733,7 +1009,17 @@ impl AppDelegate {
     fn sync_panel_expansion(&self, animated: bool) {
         let want = self.wants_panel_expanded();
         let ivars = self.ivars();
-        if ivars.panel_expanded.get() == want {
+        let was = ivars.panel_expanded.get();
+        // DEBUG-TEMP
+        debug_log::log(
+            "sync_panel_expansion",
+            "entry",
+            &format!(
+                r#"{{"was_expanded":{was},"want":{want},"animated":{animated},"changed":{}}}"#,
+                was != want,
+            ),
+        );
+        if was == want {
             return;
         }
         ivars.panel_expanded.set(want);
@@ -742,34 +1028,14 @@ impl AppDelegate {
             ivars.table.reloadData();
         }
         self.layout(ivars.results.borrow().len(), animated);
-        // Expanding moves the search pill from the collapsed (centered) band to
-        // the top band, which reframes the NSTextField. If the field is being
-        // edited, reframing leaves its field editor stranded at the old frame so
-        // the character that triggered the expand isn't drawn until the next
-        // keystroke. Re-attach the field editor at the new frame, preserving the
-        // typed text and caret, so the first character renders immediately.
-        if want {
-            self.resync_field_editor();
-        }
-    }
-
-    /// Re-attach the search field's field editor at the field's current frame
-    /// without losing the typed text or caret position. Used after a relayout
-    /// that moves the field while it is being edited (collapsed -> expanded).
-    fn resync_field_editor(&self) {
-        let ivars = self.ivars();
-        let Some(editor) = ivars.search.currentEditor() else {
-            return;
-        };
-        let sel: NSRange = unsafe { msg_send![&*editor, selectedRange] };
-        // Re-making first responder ends/begins editing, which repositions the
-        // field editor to the field's new frame.
-        ivars.panel.makeFirstResponder(Some(&*ivars.search));
-        if let Some(editor) = ivars.search.currentEditor() {
-            unsafe {
-                let _: () = msg_send![&*editor, setSelectedRange: sel];
-            }
-        }
+        // Expanding grows the panel and moves the search pill into the top band.
+        // The search field + icon are DIRECT subviews of the root content view
+        // and are reframed by manual `setFrame` every layout pass (same single
+        // coordinate model as the results/chips/separator). With the collapsed->
+        // expanded grow now performed NON-animated (snap open, see `layout`),
+        // the field's layer never gets an implicit Core Animation position
+        // slide, so the just-typed first character renders in place immediately
+        // — no field-editor resync / makeFirstResponder churn is needed.
     }
 
     /// Expand the panel chrome immediately (chat, AI, status rows).
@@ -801,6 +1067,8 @@ impl AppDelegate {
 
     fn show(&self) {
         let ivars = self.ivars();
+        // DEBUG-TEMP
+        debug_log::log("show", "entry", &format!(r#"{{"visible_before":{}}}"#, ivars.visible.get()));
 
         // Remember which app was frontmost before we steal focus, so window
         // commands can target its window rather than litecast's own panel.
@@ -812,7 +1080,13 @@ impl AppDelegate {
                 target_pid::set(pid);
             }
         }
-        if ivars.menu_enabled {
+        if ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.menu.enabled)
+            .unwrap_or(false)
+        {
             menu_cache::refresh(ivars.prev_app_pid.get(), 80);
         }
 
@@ -822,7 +1096,6 @@ impl AppDelegate {
             || self.wants_panel_expanded();
         ivars.panel_expanded.set(expanded);
         if !expanded {
-            ivars.panel_shell.setAlphaValue(0.0);
             for chip in &ivars.chips {
                 chip.setHidden(true);
             }
@@ -832,7 +1105,14 @@ impl AppDelegate {
         self.layout(ivars.results.borrow().len(), false);
 
         // Rotate a playful placeholder (unless in screenshot mode).
-        if ivars.playful_placeholders && ivars.screenshot_path.borrow().is_none() {
+        if ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ui.playful_placeholders)
+            .unwrap_or(true)
+            && ivars.screenshot_path.borrow().is_none()
+        {
             let idx = ivars.placeholder_idx.get();
             ivars.placeholder_idx.set(idx.wrapping_add(1));
             let text = PLAYFUL_PLACEHOLDERS[idx % PLAYFUL_PLACEHOLDERS.len()];
@@ -840,12 +1120,80 @@ impl AppDelegate {
         }
 
         let app = NSApplication::sharedApplication(self.mtm());
+        // Activate the app so the (NonactivatingPanel) launcher can become key.
+        // During Mission Control / Exposé the system holds the active state, so
+        // a single activate+makeKeyAndOrderFront can land the panel on screen
+        // WITHOUT it becoming key — the visible-but-can't-type symptom. We use
+        // the modern `activate` (which is more reliable than the deprecated
+        // ignoringOtherApps variant) and re-assert key + first responder again
+        // on the next runloop turn (see `ensure_panel_key` scheduled below),
+        // after Mission Control has had a chance to dismiss.
+        app.activate();
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
 
+        // DEBUG-TEMP: report the panel geometry/screen BEFORE ordering front so a
+        // zero-size or off-screen frame is obvious.
+        {
+            let f = ivars.panel.frame();
+            let screen_count = NSScreen::screens(self.mtm()).count();
+            let on_screen: bool = unsafe { msg_send![&*ivars.panel, isOnActiveSpace] };
+            debug_log::log(
+                "show",
+                "pre-order geometry",
+                &format!(
+                    r#"{{"x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"screens":{},"isOnActiveSpace":{}}}"#,
+                    f.origin.x, f.origin.y, f.size.width, f.size.height, screen_count, on_screen,
+                ),
+            );
+        }
+
         ivars.panel.makeKeyAndOrderFront(None);
+        // orderFrontRegardless ensures we surface above other apps' windows even
+        // when our app isn't the active one yet (e.g. invoked over Mission
+        // Control or another app's fullscreen space).
+        ivars.panel.orderFrontRegardless();
+        // Force the borderless panel to become key NOW (makeKeyAndOrderFront
+        // does not always make a NonactivatingPanel key on its own).
+        unsafe {
+            let _: () = msg_send![&*ivars.panel, makeKeyWindow];
+        }
         focus_search_field(&ivars.panel, &ivars.search);
         ivars.visible.set(true);
+
+        // Re-assert key window + first responder on the next runloop turn. When
+        // the toggle hotkey fires during Mission Control / Exposé, the panel can
+        // appear before the system finishes dismissing that mode, leaving it
+        // non-key (visible but won't accept typing). A 0-delay timer runs after
+        // the current event completes — by then Mission Control is gone and the
+        // panel reliably takes keyboard focus. Harmless in the normal case.
+        let reassert_target: &AnyObject = self;
+        let _key_guard = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.0,
+                reassert_target,
+                sel!(ensurePanelKey),
+                None,
+                false,
+            )
+        };
+        // DEBUG-TEMP: post-order state — is the window actually visible, key, and
+        // on a real screen with non-zero alpha?
+        {
+            let f = ivars.panel.frame();
+            let is_visible: bool = unsafe { msg_send![&*ivars.panel, isVisible] };
+            let is_key: bool = unsafe { msg_send![&*ivars.panel, isKeyWindow] };
+            let alpha: f64 = unsafe { msg_send![&*ivars.panel, alphaValue] };
+            let has_screen = ivars.panel.screen().is_some();
+            debug_log::log(
+                "show",
+                "panel visible",
+                &format!(
+                    r#"{{"isVisible":{is_visible},"isKeyWindow":{is_key},"alphaValue":{alpha:.3},"hasScreen":{has_screen},"x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1}}}"#,
+                    f.origin.x, f.origin.y, f.size.width, f.size.height,
+                ),
+            );
+        }
         // Select the entire existing query so typing replaces it (Spotlight-style),
         // while arrow keys still navigate results without clearing it.
         self.select_all_search();
@@ -887,11 +1235,22 @@ impl AppDelegate {
         };
     }
 
+    /// Called after Preferences saves; runtime reads go through `app_state.config`.
+    fn sync_runtime_from_config(&self) {
+        // DEBUG-TEMP
+        debug_log::log("sync_runtime_from_config", "entry", "re-register hotkeys");
+        self.register_hotkeys("sync_runtime_from_config", true);
+    }
+
     fn hide_and_reset(&self) {
         let ivars = self.ivars();
         if !ivars.visible.get() {
+            // DEBUG-TEMP
+            debug_log::log("hide_and_reset", "skip (already hidden)", "");
             return;
         }
+        // DEBUG-TEMP
+        debug_log::log("hide_and_reset", "hiding panel", "");
         ivars.panel.orderOut(None);
         ivars.visible.set(false);
         ivars.pending_confirm.set(-1);
@@ -908,7 +1267,6 @@ impl AppDelegate {
         ivars.results.borrow_mut().clear();
         ivars.table.reloadData();
         ivars.panel_expanded.set(false);
-        ivars.panel_shell.setAlphaValue(0.0);
         for chip in &ivars.chips {
             chip.setHidden(true);
         }
@@ -970,7 +1328,15 @@ impl AppDelegate {
                 )
             } else {
                 Item::new(
-                    format!("Ask {}: {prompt}", ivars.ai_config.provider),
+                    format!(
+                        "Ask {}: {prompt}",
+                        ivars
+                            .app_state
+                            .config
+                            .read()
+                            .map(|c| c.ai.provider.clone())
+                            .unwrap_or_else(|_| "ai".to_string())
+                    ),
                     "Press Enter to send the screenshot + question",
                     "AI",
                     0,
@@ -1352,7 +1718,13 @@ impl AppDelegate {
     }
 
     fn run_pick_color(&self) {
-        let max = self.ivars().color_max_recent;
+        let max = self
+            .ivars()
+            .app_state
+            .config
+            .read()
+            .map(|c| c.color.max_recent)
+            .unwrap_or(12);
         self.hide_and_reset();
         match color_pick::pick_color_interactive() {
             Ok(hex) => {
@@ -1440,7 +1812,12 @@ impl AppDelegate {
         self.ensure_panel_expanded();
         self.layout(1, false);
 
-        let config = ivars.ai_config.clone();
+        let config = ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ai.clone())
+            .unwrap_or_default();
         let pending = ivars.ai_pending.clone();
         let history = ivars.chat.borrow().clone();
         let delegate_addr = self as *const AppDelegate as usize;
@@ -1559,7 +1936,14 @@ impl AppDelegate {
     /// something always strolls across the panel out of the box.
     fn start_critter_walk(&self) {
         let ivars = self.ivars();
-        if !ivars.critters_enabled || !ivars.visible.get() {
+        if !ivars
+            .app_state
+            .config
+            .read()
+            .map(|c| c.ui.critters)
+            .unwrap_or(false)
+            || !ivars.visible.get()
+        {
             return;
         }
         let idx = ivars.critter_idx.get();
@@ -1668,21 +2052,39 @@ impl AppDelegate {
             NSPoint::new(x, origin_y),
             NSSize::new(PANEL_WIDTH, total_h),
         );
-        let shell_alpha = if expanded { 1.0 } else { 0.0 };
-        if animated {
+        // FLICKER FIX (93bcc0): the first-keystroke flicker (the just-typed char
+        // sliding from the old field position) only ever occurred on the SINGLE
+        // `animated:true` collapsed->expanded GROW. During an animated window
+        // resize, the layer-backed search field's backing CALayer gets an
+        // IMPLICIT Core Animation position animation, so the field's text slides
+        // into place over ~0.2s. Every other layout is `animated:false` and
+        // renders fine. The simple, robust fix is to SNAP the panel open
+        // (non-animated) on the grow, so there is no implicit layer position
+        // animation to slide the field — the typed character renders in place
+        // immediately. We still animate the COLLAPSE (shrink), which has no
+        // field-edit in flight and preserves the collapse-transparency behavior.
+        //
+        // `animated` is only ever true here when the expansion state changes
+        // (sync_panel_expansion), i.e. exactly the grow (expand) and shrink
+        // (collapse) transitions; comparing the target height to the current
+        // panel height distinguishes the two. A growing target == expand == snap.
+        let growing = frame.size.height > ivars.panel.frame().size.height + 0.5;
+        let animate_resize = animated && !growing;
+        if animate_resize {
             unsafe {
                 NSAnimationContext::beginGrouping();
                 let ctx = NSAnimationContext::currentContext();
                 ctx.setDuration(PANEL_EXPAND_DURATION);
                 let panel_anim: Retained<AnyObject> = msg_send![&*ivars.panel, animator];
                 let _: () = msg_send![&panel_anim, setFrame: frame, display: true];
-                let shell_anim: Retained<AnyObject> = msg_send![&*ivars.panel_shell, animator];
-                let _: () = msg_send![&shell_anim, setAlphaValue: shell_alpha];
                 NSAnimationContext::endGrouping();
             }
         } else {
+            // Snap (no animation): collapsed->expanded grow, and all the routine
+            // `animated:false` relayouts. With no animated grow the field's layer
+            // cannot acquire an implicit position animation, so the first typed
+            // character paints in place with no slide.
             ivars.panel.setFrame_display(frame, true);
-            ivars.panel_shell.setAlphaValue(shell_alpha);
         }
 
         for chip in &ivars.chips {
@@ -1709,32 +2111,27 @@ impl AppDelegate {
             }
         }
 
-        // Search pill: top band when expanded, vertically centered when collapsed.
+        // Search area: the magnifier icon + text field are DIRECT subviews of
+        // the root content view and are framed HERE every layout pass, using the
+        // SAME non-flipped root coordinate space as the chips / separator /
+        // results scrollview below. There is ONE coordinate model for every panel
+        // subview — no container, no autoresizing mask, no constraints, no
+        // layer-action tricks. The search band is the TOP band of the panel:
+        // it spans y = [total_h - SEARCH_AREA_H, total_h]. The pill sits
+        // SEARCH_TOP_PAD below the panel TOP; in a non-flipped view the top edge
+        // is the larger y, so we subtract from `total_h` to get the pill bottom.
+        let pill_bottom = total_h - SEARCH_TOP_PAD - SEARCH_PILL_H;
         let pill_x = SIDE_INSET;
         let pill_w = PANEL_WIDTH - 2.0 * SIDE_INSET;
-        let pill_y = if expanded {
-            let search_area_bottom = band_bottom + CHIP_ROW_H;
-            (search_area_bottom + SEARCH_TO_CHIP_GAP).round()
-        } else {
-            SEARCH_TOP_PAD.round()
-        };
-        ivars.search_bg.setFrame(NSRect::new(
-            NSPoint::new(pill_x, pill_y),
-            NSSize::new(pill_w, SEARCH_PILL_H),
-        ));
-
         let icon_x = pill_x + SEARCH_PILL_PAD_X;
-        let icon_y = (pill_y + (SEARCH_PILL_H - SEARCH_ICON) / 2.0).round();
+        let icon_y = (pill_bottom + (SEARCH_PILL_H - SEARCH_ICON) / 2.0).round();
         ivars.search_icon.setFrame(NSRect::new(
             NSPoint::new(icon_x, icon_y),
             NSSize::new(SEARCH_ICON, SEARCH_ICON),
         ));
-
-        // Text field sized to its exact text height and centered in the pill, so
-        // the text lands on the pill's vertical midline.
         let search_h = line_height(SEARCH_FONT_SIZE, false);
         let text_x = icon_x + SEARCH_ICON + SEARCH_ICON_GAP;
-        let search_y = (pill_y + (SEARCH_PILL_H - search_h) / 2.0).round();
+        let search_y = (pill_bottom + (SEARCH_PILL_H - search_h) / 2.0).round();
         let search_w = (pill_x + pill_w - SEARCH_PILL_PAD_X - text_x).max(40.0);
         ivars.search.setFrame(NSRect::new(
             NSPoint::new(text_x, search_y),
@@ -1764,12 +2161,29 @@ impl AppDelegate {
             sync_results_table_geometry(&ivars.scroll, &ivars.table, total_table_h);
         }
 
-        // Keep the material shell sized to the full expanded chrome height.
-        let shell_h = SEARCH_AREA_H + CHIP_ROW_H + results_block;
+        // Keep the material shell sized to exactly the window content height in
+        // both states. Sizing it to a fixed full-chrome height instead left the
+        // collapsed shell (108) taller than the collapsed window (72); during an
+        // animated expand->collapse the effect view's ViewHeightSizable mask then
+        // shrank it by the full (large) height delta, dropping it below the
+        // visible pill and exposing the transparent root. Matching total_h means
+        // the shell == root bounds (zero margins), so autoresizing keeps it
+        // pinned to fill the window for the whole animation. When expanded this
+        // equals the previous SEARCH_AREA_H + CHIP_ROW_H + results_block, so the
+        // expanded layout is unchanged.
         ivars.panel_shell.setFrame(NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(PANEL_WIDTH, shell_h),
+            NSSize::new(PANEL_WIDTH, total_h),
         ));
+        // DEBUG-TEMP
+        let scroll_h = results_h + RESULTS_SCROLL_BOTTOM_INSET;
+        debug_log::log(
+            "layout",
+            "applied",
+            &format!(
+                r#"{{"expanded":{expanded},"animated":{animated},"growing":{growing},"animate_resize":{animate_resize},"total_h":{total_h},"search_frame":{{"x":{text_x},"y":{search_y},"w":{search_w},"h":{search_h}}},"scroll_frame":{{"x":0.0,"y":{RESULTS_BOTTOM_PAD},"w":{PANEL_WIDTH},"h":{scroll_h}}}}}"#,
+            ),
+        );
     }
 }
 
@@ -2497,7 +2911,6 @@ struct PanelViews {
     panel: Retained<LcPanel>,
     panel_shell: Retained<NSVisualEffectView>,
     search: Retained<NSTextField>,
-    search_bg: Retained<NSVisualEffectView>,
     search_icon: Retained<NSImageView>,
     table: Retained<NSTableView>,
     scroll: Retained<NSScrollView>,
@@ -2537,46 +2950,42 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     );
 
     // Root clips the square window frame to rounded corners; the vibrancy view
-    // fills it so header, chips, and results share one material surface.
+    // fills it so the search area, chips, and results all share one continuous
+    // material surface (no separate floating search pill, no two-tone seam).
     let root = NSView::initWithFrame(NSView::alloc(mtm), content_rect);
     apply_rounded_clip(&root, CORNER_RADIUS);
 
+    // Single unified, opaque-looking vibrancy surface for the entire panel. It
+    // stays fully visible in both the collapsed (search-only) and expanded
+    // states, so the typing area reads as the top of the panel itself, flush to
+    // the rounded border. Chips/results sit on top and are shown/hidden.
     let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content_rect);
     effect.setMaterial(NSVisualEffectMaterial::Menu);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
-    effect.setAutoresizingMask(
-        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
     root.addSubview(&effect);
+    // Pin the frosted shell to fill the root content view exactly, in both
+    // states and throughout animated window/content-view resizes. Auto Layout
+    // constraints (not the old ViewWidthSizable|ViewHeightSizable autoresizing
+    // mask) are immune to the autoresize-delta race that previously drove the
+    // shell height to 0 on a large animated collapse (542->72), leaving the
+    // interior transparent. Only this full-bleed background view uses
+    // constraints; all other subviews are still positioned by frame in layout().
+    effect.setTranslatesAutoresizingMaskIntoConstraints(false);
+    NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+        effect
+            .leadingAnchor()
+            .constraintEqualToAnchor(&root.leadingAnchor()),
+        effect
+            .trailingAnchor()
+            .constraintEqualToAnchor(&root.trailingAnchor()),
+        effect.topAnchor().constraintEqualToAnchor(&root.topAnchor()),
+        effect
+            .bottomAnchor()
+            .constraintEqualToAnchor(&root.bottomAnchor()),
+    ]));
 
-    // Spotlight-style rounded pill background behind the search field. This is a
-    // frosted vibrancy view (not a faint translucent fill) so the pill reads as
-    // a solid floating search box rather than see-through to the desktop. It is
-    // always visible — both collapsed and expanded — sized/positioned in
-    // `layout`. Corner radius + masking give it fully rounded ends, plus a
-    // hairline border.
-    let search_bg = NSVisualEffectView::initWithFrame(
-        NSVisualEffectView::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, SEARCH_PILL_H)),
-    );
-    search_bg.setMaterial(NSVisualEffectMaterial::Menu);
-    search_bg.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    search_bg.setState(NSVisualEffectState::Active);
-    search_bg.setWantsLayer(true);
-    if let Some(layer) = search_bg.layer() {
-        let border = NSColor::labelColor().colorWithAlphaComponent(0.10);
-        unsafe {
-            let border_cg: *mut AnyObject = msg_send![&*border, CGColor];
-            let _: () = msg_send![&*layer, setCornerRadius: SEARCH_PILL_H / 2.0];
-            let _: () = msg_send![&*layer, setMasksToBounds: true];
-            let _: () = msg_send![&*layer, setBorderWidth: 1.0_f64];
-            let _: () = msg_send![&*layer, setBorderColor: border_cg];
-        }
-    }
-
-    // Leading magnifier glyph inside the pill.
+    // Leading magnifier glyph at the start of the search area.
     let search_icon = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SEARCH_ICON, SEARCH_ICON)),
@@ -2688,20 +3097,29 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
     effect.addSubview(&critter);
     effect.addSubview(&critter_label);
-    effect.setAlphaValue(0.0);
     for chip in &chips {
         chip.setHidden(true);
     }
-    root.addSubview(&search_bg);
+    // SIMPLIFIED (93bcc0): the magnifier icon + search text field are DIRECT
+    // subviews of the root content view — the SAME view (and coordinate space)
+    // the results scrollview/chips/separator live relative to in `layout`. No
+    // container subclass, no autoresizing mask, no Auto Layout constraints, and
+    // no layer-action / implicit-animation suppression. They are added on top of
+    // the frosted `panel_shell` (added to root first, above), so the search pill
+    // draws over the material while the chips/results (children of the shell)
+    // sit below it. Their frames are set every layout pass by `layout()` using
+    // the one shared coordinate model; the initial frames set during field
+    // construction above are placeholders that `layout()` (run on `show`)
+    // immediately overrides.
     root.addSubview(&search_icon);
     root.addSubview(&search);
+
     panel.setContentView(Some(&root));
 
     PanelViews {
         panel,
         panel_shell: effect,
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
@@ -2712,216 +3130,84 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
 }
 
-/// Parse a hotkey combo like "Cmd+Shift+S" into a `HotKey`. Modifiers accept
-/// Cmd/Command/Super/Win, Ctrl/Control, Alt/Option/Opt, and Shift; the final
-/// token is the key. Requires at least one modifier (global hotkeys without one
-/// are a bad idea) and exactly one key. Returns `None` on anything unrecognized.
-fn parse_hotkey_combo(combo: &str) -> Option<HotKey> {
-    let mut mods = Modifiers::empty();
-    let mut code: Option<Code> = None;
-    for part in combo.split('+') {
-        let token = part.trim();
-        if token.is_empty() {
-            continue;
-        }
-        match token.to_ascii_lowercase().as_str() {
-            "cmd" | "command" | "super" | "win" | "meta" => mods |= Modifiers::META,
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "alt" | "option" | "opt" => mods |= Modifiers::ALT,
-            "shift" => mods |= Modifiers::SHIFT,
-            other => {
-                if code.is_some() {
-                    return None;
-                }
-                code = parse_key_code(other);
-                code?;
-            }
-        }
-    }
-    let code = code?;
-    if mods.is_empty() {
-        return None;
-    }
-    Some(HotKey::new(Some(mods), code))
+/// True when running as `Something.app/Contents/MacOS/litecast` (Finder/Dock launch).
+fn launched_from_app_bundle() -> bool {
+    let exe = std::env::current_exe();
+    let result = exe
+        .as_ref()
+        .ok()
+        .is_some_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
+    // DEBUG-TEMP: log the exact exe path so we know WHICH binary/app launched
+    // (bundled .app vs. bare terminal binary vs. a stale .app copy).
+    debug_log::log(
+        "launched_from_app_bundle",
+        "current_exe",
+        &format!(
+            r#"{{"exe":{:?},"is_app_bundle":{}}}"#,
+            exe.map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|e| format!("<error: {e}>")),
+            result,
+        ),
+    );
+    result
 }
 
-/// Map a single key token (a letter, digit, or named key) to a `Code`.
-fn parse_key_code(token: &str) -> Option<Code> {
-    use Code::*;
-    let upper = token.to_ascii_uppercase();
-    Some(match upper.as_str() {
-        "A" => KeyA, "B" => KeyB, "C" => KeyC, "D" => KeyD, "E" => KeyE, "F" => KeyF,
-        "G" => KeyG, "H" => KeyH, "I" => KeyI, "J" => KeyJ, "K" => KeyK, "L" => KeyL,
-        "M" => KeyM, "N" => KeyN, "O" => KeyO, "P" => KeyP, "Q" => KeyQ, "R" => KeyR,
-        "S" => KeyS, "T" => KeyT, "U" => KeyU, "V" => KeyV, "W" => KeyW, "X" => KeyX,
-        "Y" => KeyY, "Z" => KeyZ,
-        "0" => Digit0, "1" => Digit1, "2" => Digit2, "3" => Digit3, "4" => Digit4,
-        "5" => Digit5, "6" => Digit6, "7" => Digit7, "8" => Digit8, "9" => Digit9,
-        "F1" => F1, "F2" => F2, "F3" => F3, "F4" => F4, "F5" => F5, "F6" => F6,
-        "F7" => F7, "F8" => F8, "F9" => F9, "F10" => F10, "F11" => F11, "F12" => F12,
-        "SPACE" => Space,
-        "ENTER" | "RETURN" => Enter,
-        "TAB" => Tab,
-        "ESC" | "ESCAPE" => Escape,
-        "UP" => ArrowUp,
-        "DOWN" => ArrowDown,
-        "LEFT" => ArrowLeft,
-        "RIGHT" => ArrowRight,
-        "MINUS" | "-" => Minus,
-        "EQUAL" | "=" => Equal,
-        "COMMA" | "," => Comma,
-        "PERIOD" | "." => Period,
-        "SLASH" | "/" => Slash,
-        "BACKSLASH" | "\\" => Backslash,
-        "SEMICOLON" | ";" => Semicolon,
-        "QUOTE" | "'" => Quote,
-        "BACKQUOTE" | "`" => Backquote,
-        "LEFTBRACKET" | "[" => BracketLeft,
-        "RIGHTBRACKET" | "]" => BracketRight,
-        _ => return None,
-    })
-}
-
-/// Resolve a `[[hotkeys]]` entry into the `Action` to run on press. For
-/// `kind = "command"`, the target names a `[[commands]]` entry, whose own
-/// kind/target define the action (with `{}` stripped, since a hotkey carries
-/// no argument).
-fn resolve_hotkey_action(hk: &HotkeyConfig, commands: &[CommandConfig]) -> Option<Action> {
-    match hk.kind.as_str() {
-        "open" => Some(Action::Open(hk.target.clone())),
-        "shell" => Some(Action::RunShell(hk.target.clone())),
-        "command" => {
-            let cmd = commands.iter().find(|c| c.name == hk.target)?;
-            let target = cmd.target.replace("{}", "");
-            Some(match cmd.kind.as_str() {
-                "shell" => Action::RunShell(target),
-                _ => Action::Open(target),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn build_engine(history: History, config: &Config, frecency: Frecency) -> Engine {
-    let mut engine = Engine::new(frecency);
-    // EasterEgg is general fun: only shown when no filter is active.
-    engine.add(Box::new(EasterEggProvider), Filter::All);
-    engine.add(Box::new(AiProvider::new(config.ai.clone())), Filter::Ai);
-    engine.add(
-        Box::new(AiCommandsProvider::new(&config.ai, history.clone())),
-        Filter::Ai,
-    );
-    engine.add(Box::new(CalcProvider), Filter::Calc);
-    let currency = CurrencyCache::new(config.conversion.currency_ttl_hours);
-    // Warm the rate cache in the background so the first currency query is fast.
-    currency.refresh_async();
-    engine.add(Box::new(ConvertProvider::new(currency)), Filter::Calc);
-    // Developer tools, color/base/epoch converters, and date/time helpers all
-    // live under the Calc category (keyword-gated, idle-cheap).
-    engine.add(Box::new(DevToolsProvider), Filter::Calc);
-    engine.add(Box::new(ConvertersProvider), Filter::Calc);
-    engine.add(
-        Box::new(DateTimeProvider::new(config.datetime.pairs())),
-        Filter::Calc,
-    );
-    engine.add(Box::new(EmojiProvider), Filter::Emoji);
-    engine.add(Box::new(ClipboardProvider::new(history)), Filter::Clip);
-    // The "Commands" category groups user commands, quicklinks, snippets,
-    // plugins, and system actions.
-    engine.add(
-        Box::new(CommandsProvider::new(config.commands.clone())),
-        Filter::Cmd,
-    );
-    // App commands are `@keyword`-namespaced; `@` is not a category token, so
-    // the raw `@keyword arg` query reaches this provider under `All` (and Cmd).
-    let app_commands = config::merged_app_commands(&config.app_commands);
-    engine.add(
-        Box::new(AppCommandsProvider::new(
-            app_commands.clone(),
-            config.web_search_url.clone(),
-        )),
-        Filter::All,
-    );
-    engine.add(
-        Box::new(AppCommandsProvider::new(
-            app_commands,
-            config.web_search_url.clone(),
-        )),
-        Filter::Cmd,
-    );
-    engine.add(
-        Box::new(QuicklinksProvider::new(config.quicklinks.clone())),
-        Filter::Cmd,
-    );
-    engine.add(
-        Box::new(SnippetsProvider::new(config.snippets.entries.clone())),
-        Filter::Cmd,
-    );
-    // Script commands: executable scripts in the watched dir, parsed lazily and
-    // cached (re-scanned only when the directory's mtime changes).
-    engine.add(
-        Box::new(ScriptsProvider::new(&config.scripts.dir)),
-        Filter::Cmd,
-    );
-    engine.add(Box::new(SystemProvider::new()), Filter::Cmd);
-    engine.add(Box::new(GitProvider::new(config.git.clone())), Filter::Cmd);
-    engine.add(Box::new(TextTransformProvider), Filter::Cmd);
-    engine.add(Box::new(ProgUtilsProvider), Filter::Cmd);
-    engine.add(Box::new(PomodoroProvider::new(config.pomodoro.clone())), Filter::Cmd);
-    engine.add(Box::new(NewFileProvider::new(config.newfile.clone())), Filter::Cmd);
-    engine.add(Box::new(ColorProvider::new(config.color.clone())), Filter::Calc);
-    if config.menu.enabled {
-        engine.add(Box::new(MenuProvider::new(config.menu.clone())), Filter::Cmd);
-    }
-    // Window/tab switcher: keyword-gated (`windows`/`switch`/`tabs`); listing is
-    // cached briefly and only runs osascript on a keyword match.
-    engine.add(Box::new(SwitcherProvider::new()), Filter::Cmd);
-    // Window management is opt-in (needs Accessibility); only surface its
-    // commands when explicitly enabled in the config.
-    if config.window.enabled {
-        engine.add(Box::new(WindowProvider::new()), Filter::Cmd);
-    }
-    engine.add(Box::new(PluginProvider::new()), Filter::Cmd);
-    // Process manager: keyword-gated (`kill`/`ps`); kills go through a confirm.
-    engine.add(Box::new(ProcessProvider::new()), Filter::Cmd);
-    // Keyword-gated utility providers (calendar/network/notes/dictionary/media).
-    // Each returns immediately unless its keyword matches, so they stay cheap on
-    // the default path; the ones that shell out only do so on a match.
-    engine.add(Box::new(CalendarProvider::new()), Filter::Cmd);
-    engine.add(Box::new(NetworkProvider::new()), Filter::Cmd);
-    engine.add(
-        Box::new(NotesProvider::new(
-            &config.notes.file,
-            config.notes.apple_notes,
-        )),
-        Filter::Cmd,
-    );
-    engine.add(Box::new(DictionaryProvider::new()), Filter::Cmd);
-    engine.add(Box::new(MediaProvider), Filter::Cmd);
-    engine.add(Box::new(AppsProvider::new()), Filter::Apps);
-    engine.add(Box::new(FilesProvider::new()), Filter::Files);
-    // File power actions + recent files/downloads (keyword-gated).
-    engine.add(Box::new(FileActionsProvider), Filter::Files);
-    engine.add(Box::new(BookmarksProvider::new()), Filter::Web);
-    engine.add(
-        Box::new(WebSearchProvider::new(config.web_search_url.clone())),
-        Filter::Web,
-    );
-    engine
+/// Open (or raise) the Settings window when the user launches/reopens the .app.
+///
+/// This is the GUI-launch and Dock-reopen entry point. The search launcher is
+/// intentionally NOT shown here; it remains bound to Option+Space and the
+/// menu-bar "Open litecast" item. `preferences::show` already raises an existing
+/// Settings window and activates the app frontmost (activateIgnoringOtherApps +
+/// orderFrontRegardless), so it wins over the floating launcher panel (level 25).
+fn activation_present_settings(delegate: &AppDelegate, reason: &str) {
+    debug_log::log(reason, "presenting Settings window", "{}");
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let ptr = std::ptr::from_ref(delegate) as usize;
+    preferences::show(mtm, delegate.ivars().app_state.clone(), ptr);
 }
 
 fn main() {
-    eprintln!("[litecast] starting...");
+    debug_log::init(); // DEBUG-TEMP
+    // DEBUG-TEMP: startup banner. Compiled out in release builds so a shipped
+    // binary writes nothing to stderr.
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("[litecast] starting (global hotkeys register after launch)…");
+        for path in debug_log::paths() {
+            eprintln!("[litecast] debug log: {}", path.display());
+        }
+    }
+    // DEBUG-TEMP
+    debug_log::log("main", "startup", r#"{"phase":"begin"}"#);
+    // DEBUG-TEMP: which binary launched us + pid. A GUI Spotlight/Launchpad launch
+    // shows a `.app/Contents/MacOS/litecast` path; a bare `cargo run`/terminal run
+    // shows `target/<profile>/litecast`. There is NO single-instance guard in this
+    // app, so a second launch starts a second process — UNLESS macOS LaunchServices
+    // sees an instance with the same CFBundleIdentifier already running and just
+    // reactivates it (then no new "main startup" line appears here at all).
+    debug_log::log(
+        "main",
+        "exe + pid",
+        &format!(
+            r#"{{"exe":{:?},"pid":{}}}"#,
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|e| format!("<error: {e}>")),
+            std::process::id(),
+        ),
+    );
+    let open_prefs = std::env::args().any(|a| a == "--preferences" || a == "-preferences");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // DEBUG-TEMP
+    debug_log::log("main", "activation_policy", r#"{"policy":"Regular"}"#);
 
     let views = build_panel(mtm);
     let PanelViews {
         panel,
         panel_shell,
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
@@ -2947,81 +3233,29 @@ fn main() {
         Vec::new()
     };
 
-    let manager = GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
-    // Toggle/screenshot combos are configurable via `[hotkey]`; fall back to the
-    // built-in Option+Space / Option+Shift+Space when unset or unparseable.
-    let toggle_hotkey = parse_hotkey_combo(&config.hotkey.toggle).unwrap_or_else(|| {
-        if !config.hotkey.toggle.is_empty() {
-            eprintln!(
-                "[litecast] invalid [hotkey] toggle {:?}; using Option+Space",
-                config.hotkey.toggle
-            );
-        }
-        HotKey::new(Some(Modifiers::ALT), Code::Space)
-    });
-    let shot_hotkey = parse_hotkey_combo(&config.hotkey.screenshot).unwrap_or_else(|| {
-        if !config.hotkey.screenshot.is_empty() {
-            eprintln!(
-                "[litecast] invalid [hotkey] screenshot {:?}; using Option+Shift+Space",
-                config.hotkey.screenshot
-            );
-        }
-        HotKey::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
-    });
-    if let Err(e) = manager.register(toggle_hotkey) {
-        eprintln!(
-            "[litecast] failed to register toggle hotkey {}: {e}",
-            config.hotkey.toggle
-        );
-    }
-    if let Err(e) = manager.register(shot_hotkey) {
-        eprintln!(
-            "[litecast] failed to register screenshot hotkey {}: {e}",
-            config.hotkey.screenshot
-        );
-    }
-    eprintln!(
-        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
-        config.hotkey.toggle
-    );
-    let toggle_id = toggle_hotkey.id();
-    let shot_id = shot_hotkey.id();
-
-    // User-defined global hotkeys from `[[hotkeys]]`. Each binds a key combo to
-    // an action (open/shell/named command). Registration is best-effort and
-    // non-fatal, mirroring the built-in hotkeys above.
-    let mut hotkey_actions: HashMap<u32, Action> = HashMap::new();
-    for hk in &config.hotkeys {
-        let Some(parsed) = parse_hotkey_combo(&hk.key) else {
-            eprintln!("[litecast] skipping hotkey with invalid combo: {:?}", hk.key);
-            continue;
-        };
-        let Some(action) = resolve_hotkey_action(hk, &config.commands) else {
-            eprintln!(
-                "[litecast] skipping hotkey {:?}: unknown kind/target ({}: {})",
-                hk.key, hk.kind, hk.target
-            );
-            continue;
-        };
-        match manager.register(parsed) {
-            Ok(()) => {
-                hotkey_actions.insert(parsed.id(), action);
-            }
-            Err(e) => eprintln!("[litecast] failed to register custom hotkey {}: {e}", hk.key),
-        }
-    }
-
     let (query_tx, query_rx) = mpsc::channel::<(u64, String, Filter)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
     let history = History::new(50, config.clipboard.max_images);
     let frecency = Frecency::load();
+    let app_state = Arc::new(
+        app_state::AppState::new(config.clone(), history.clone(), frecency.clone())
+            .unwrap_or_else(|e| panic!("app state setup failed: {e}")),
+    );
+    // DEBUG-TEMP
+    debug_log::log(
+        "main",
+        "config hotkey",
+        &format!(
+            r#"{{"toggle":"{}","screenshot":"{}"}}"#,
+            config.hotkey.toggle, config.hotkey.screenshot,
+        ),
+    );
 
     let ivars = Ivars {
         panel,
         panel_shell,
         panel_expanded: Cell::new(false),
         search,
-        search_bg,
         search_icon,
         table,
         scroll,
@@ -3034,9 +3268,7 @@ fn main() {
         chips,
         pending: pending.clone(),
         clip_history: history.clone(),
-        keep_images: config.clipboard.keep_images,
         last_change: Cell::new(-1),
-        ai_config: config.ai.clone(),
         ai_pending: Arc::new(Mutex::new(None)),
         ai_generation: Cell::new(0),
         chat: RefCell::new(Vec::new()),
@@ -3045,9 +3277,7 @@ fn main() {
         last_ai: RefCell::new(None),
         screenshot_path: RefCell::new(None),
         shot_pending: Arc::new(Mutex::new(None)),
-        playful_placeholders: config.ui.playful_placeholders,
         placeholder_idx: Cell::new(0),
-        critters_enabled: config.ui.critters,
         critter_view: critter,
         critter_label,
         critter_images,
@@ -3057,9 +3287,8 @@ fn main() {
         suppress_ghost: Cell::new(false),
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
-        menu_enabled: config.menu.enabled,
-        color_max_recent: config.color.max_recent,
-        _hotkey_manager: manager,
+        app_state: app_state.clone(),
+        _hotkey_manager: RefCell::new(None),
     };
 
     let delegate: Retained<AppDelegate> = {
@@ -3096,7 +3325,7 @@ fn main() {
     // sources like mdfind never block typing) and signals the main thread when
     // results are ready. Blocks on recv when idle, so it uses zero CPU.
     {
-        let engine = Arc::new(build_engine(history.clone(), &config, frecency.clone()));
+        let engine = app_state.engine.clone();
         let pending = pending.clone();
         std::thread::spawn(move || {
             while let Ok((mut generation, mut query, mut filter)) = query_rx.recv() {
@@ -3106,7 +3335,10 @@ fn main() {
                     query = q;
                     filter = f;
                 }
-                let items = engine.query(&query, filter);
+                let items = engine
+                    .read()
+                    .map(|e| e.query(&query, filter))
+                    .unwrap_or_default();
                 if let Ok(mut slot) = pending.lock() {
                     *slot = Some((generation, items));
                 }
@@ -3124,27 +3356,90 @@ fn main() {
         });
     }
 
+    // DEBUG-TEMP: heartbeat thread proves the listener is alive and *blocked in
+    // recv()* (vs. the thread having died or never reaching recv). If heartbeats
+    // keep printing but no "event received" line appears when you press the
+    // hotkey, the OS is simply not delivering the Carbon hotkey event.
+    std::thread::spawn(move || {
+        let mut n: u64 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            n += 1;
+            debug_log::log(
+                "hotkey_heartbeat",
+                "alive",
+                &format!(r#"{{"tick":{n},"hint":"press the hotkey now; expect an 'event received' line"}}"#),
+            );
+        }
+    });
+
     // Hotkey listener: blocks when idle (zero CPU) and bounces onto the main thread.
+    let hotkey_ids = app_state.hotkey_ids.clone();
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
+        // DEBUG-TEMP
+        debug_log::log(
+            "hotkey_thread",
+            "started",
+            r#"{"detail":"listening","note":"receiver channel acquired"}"#,
+        );
         while let Ok(event) = receiver.recv() {
+            // DEBUG-TEMP
+            debug_log::log(
+                "hotkey_thread",
+                "event received",
+                &format!(
+                    r#"{{"id":{},"state":"{:?}"}}"#,
+                    event.id, event.state,
+                ),
+            );
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            // Custom hotkeys map directly to an Action (open/shell). These only
-            // spawn subprocesses, so they run here without touching the main
-            // thread or the panel.
-            if let Some(action) = hotkey_actions.get(&event.id) {
+            let ids = hotkey_ids.lock().ok();
+            let Some(ids) = ids else {
+                debug_log::log("hotkey_thread", "ids lock failed", "");
+                continue;
+            };
+            // DEBUG-TEMP
+            debug_log::log(
+                "hotkey_thread",
+                "matching",
+                &format!(
+                    r#"{{"event_id":{},"toggle_id":{},"screenshot_id":{},"custom_count":{}}}"#,
+                    event.id,
+                    ids.toggle,
+                    ids.screenshot,
+                    ids.custom.len(),
+                ),
+            );
+            if let Some(action) = ids.custom.get(&event.id) {
                 action.execute();
                 continue;
             }
-            let selector = if event.id == shot_id {
+            let selector = if event.id == ids.screenshot {
                 sel!(captureScreenshot)
-            } else if event.id == toggle_id {
+            } else if event.id == ids.toggle {
                 sel!(toggleFromHotkey)
             } else {
+                debug_log::log(
+                    "hotkey_thread",
+                    "unmatched id",
+                    &format!(r#"{{"event_id":{}}}"#, event.id),
+                );
                 continue;
             };
+            // DEBUG-TEMP
+            let sel_name = if event.id == ids.screenshot {
+                "captureScreenshot"
+            } else {
+                "toggleFromHotkey"
+            };
+            debug_log::log(
+                "hotkey_thread",
+                "dispatch main thread",
+                &format!(r#"{{"selector":"{sel_name}"}}"#),
+            );
             let ptr = delegate_addr as *const AnyObject;
             unsafe {
                 let obj: &AnyObject = &*ptr;
@@ -3183,5 +3478,84 @@ fn main() {
         )
     };
 
+    if open_prefs {
+        preferences::show(mtm, app_state, delegate_addr);
+    }
+
+    // DEBUG-TEMP: A global NSEvent monitor reports whether the Option+Space
+    // keystroke reaches THIS process at all while another app is focused. This
+    // distinguishes "OS never sends us the key" (e.g. another app/system owns the
+    // shortcut, or Input Monitoring is denied → this logs nothing) from "key
+    // arrives but the global-hotkey Carbon handler isn't firing" (this logs but
+    // the hotkey_thread does not). NB: a global monitor never swallows the event.
+    {
+        let mask = NSEventMask::KeyDown | NSEventMask::FlagsChanged;
+        let handler = block2::RcBlock::new(move |event: core::ptr::NonNull<NSEvent>| {
+            let event = unsafe { event.as_ref() };
+            let etype = event.r#type();
+            let key_code = event.keyCode();
+            let flags = event.modifierFlags().0 as u64;
+            // DEBUG-TEMP
+            debug_log::log(
+                "global_event_monitor",
+                "key event seen by process",
+                &format!(
+                    r#"{{"type":"{etype:?}","keyCode":{key_code},"modifierFlags":{flags}}}"#
+                ),
+            );
+        });
+        let monitor: Option<Retained<AnyObject>> = unsafe {
+            msg_send![
+                class!(NSEvent),
+                addGlobalMonitorForEventsMatchingMask: mask,
+                handler: &*handler,
+            ]
+        };
+        // DEBUG-TEMP
+        debug_log::log(
+            "global_event_monitor",
+            "install result",
+            &format!(
+                r#"{{"installed":{},"note":"if this stays installed=true but no 'key event seen' lines appear on keypress, the OS is not routing the key to us (Input Monitoring permission or another owner)"}}"#,
+                monitor.is_some()
+            ),
+        );
+        // Leak the monitor token so AppKit keeps delivering for the whole session.
+        if let Some(monitor) = monitor {
+            std::mem::forget(monitor);
+        }
+    }
+
+    // DEBUG-TEMP: one-shot timer confirms the NSApplication run loop is actually
+    // pumping (if this never logs, run() isn't servicing the main run loop, which
+    // would also explain missing delegate callbacks and Carbon hotkey events).
+    let _runloop_probe = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            0.5,
+            &*delegate,
+            sel!(runLoopProbe),
+            None,
+            false,
+        )
+    };
+
+    // Finish launch synchronously so the Carbon application event target exists,
+    // then register global hotkeys (applicationDidFinishLaunching does the same;
+    // the explicit call covers launch paths where the delegate callback is deferred).
+    // DEBUG-TEMP
+    debug_log::log("main", "pre finishLaunching", "{}");
+    app.finishLaunching();
+    // DEBUG-TEMP
+    debug_log::log(
+        "main",
+        "post finishLaunching",
+        &format!(r#"{{"app_running":{}}}"#, unsafe {
+            let running: bool = msg_send![&*app, isRunning];
+            running
+        }),
+    );
+    (&*delegate).ensure_hotkeys_registered("main:post_finishLaunching");
+    // DEBUG-TEMP
+    debug_log::log("main", "entering run loop", r#"{"note":"app.run() about to block"}"#);
     app.run();
 }

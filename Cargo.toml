@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 accessibility-sys = "0.2.0"
+block2 = "0.6"
 core-foundation = "0.10.1"
 core-graphics-types = "0.2.0"
 global-hotkey = "0.8.0"
@@ -88,6 +89,13 @@ features = [
     "NSAnimationContext",
     "NSTrackingArea",
     "NSAppearance",
+    "NSTabView",
+    "NSTabViewItem",
+    "NSToolbar",
+    "NSToolbarItem",
+    "NSPopUpButton",
+    "NSOpenPanel",
+    "NSAlert",
 ]
 
 [profile.release]

@@ -5,6 +5,17 @@
 .DS_Store
 .env
 
+# Cursor agent scratch: debug logs, local settings, plans. Never commit.
+.cursor/
+debug-litecast.log
+**/debug-litecast.log
+debug-*.log
+
+# Generated build artifacts (the source icon lives at bundle/litecast.icns and
+# IS tracked; ad-hoc generated .icns elsewhere are not).
+/*.icns
+/scripts/*.icns
+
 # Internal planning / design / research docs (not user-facing). User docs like
 # README.md, docs/features.md, and docs/plugins.md are tracked normally.
 docs/*-plan.md
