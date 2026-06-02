@@ -214,6 +214,10 @@ max_recent = 12
 #[serde(default)]
 pub struct Config {
     pub web_search_url: String,
+    /// Launch litecast automatically at login. Mirrored to a per-user
+    /// LaunchAgent (`~/Library/LaunchAgents/com.litecast.app.plist`); the live
+    /// system state is the source of truth and is re-read when Settings opens.
+    pub launch_at_login: bool,
     pub commands: Vec<CommandConfig>,
     pub app_commands: Vec<AppCommandConfig>,
     pub quicklinks: Vec<QuicklinkConfig>,
@@ -239,6 +243,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             web_search_url: "https://www.google.com/search?q={}".to_string(),
+            launch_at_login: false,
             commands: Vec::new(),
             app_commands: Vec::new(),
             quicklinks: Vec::new(),

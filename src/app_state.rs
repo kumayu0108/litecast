@@ -2,22 +2,24 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use global_hotkey::GlobalHotKeyManager;
-
 use crate::clipboard::History;
 use crate::config::Config;
 use crate::engine::Engine;
-use crate::frecency::Frecency;
 use crate::engine_setup;
-use crate::hotkeys::{self, HotkeyIds};
+use crate::frecency::Frecency;
+use crate::hotkeys::HotkeyIds;
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub engine: Arc<RwLock<Engine>>,
     pub history: History,
     pub frecency: Frecency,
+    /// Live hotkey ids used by the background listener thread.
     pub hotkey_ids: Arc<Mutex<HotkeyIds>>,
-    pub hotkey_manager: Mutex<Option<GlobalHotKeyManager>>,
+    /// Last global-hotkey registration error (set by the delegate on each
+    /// register attempt; `None` on success). The Preferences window reads this
+    /// right after a Save to surface combo conflicts (e.g. Cmd+Space vs Spotlight).
+    pub last_hotkey_error: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -29,7 +31,6 @@ impl AppState {
             &cfg,
             frecency.clone(),
         )));
-        let (manager, ids) = hotkeys::register_all(&cfg)?;
         drop(cfg);
 
         Ok(Self {
@@ -37,20 +38,17 @@ impl AppState {
             engine,
             history,
             frecency,
-            hotkey_ids: Arc::new(Mutex::new(ids)),
-            hotkey_manager: Mutex::new(Some(manager)),
+            hotkey_ids: Arc::new(Mutex::new(HotkeyIds::default())),
+            last_hotkey_error: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Rebuild the query engine and re-register global hotkeys from the current config.
+    /// Rebuild the query engine from the current config.
+    /// Hotkey re-registration is handled by the app delegate (`ensure_hotkeys_registered`).
     pub fn apply_config(&self) -> Result<(), String> {
         let cfg = self.config.read().map_err(|e| e.to_string())?;
         *self.engine.write().map_err(|e| e.to_string())? =
             engine_setup::build_engine(self.history.clone(), &cfg, self.frecency.clone());
-
-        let (manager, ids) = hotkeys::register_all(&cfg)?;
-        *self.hotkey_manager.lock().map_err(|e| e.to_string())? = Some(manager);
-        *self.hotkey_ids.lock().map_err(|e| e.to_string())? = ids;
         Ok(())
     }
 }

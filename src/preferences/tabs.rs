@@ -1,13 +1,13 @@
 //! Preferences tab views and draft → `Config` collection.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{msg_send, sel, MainThreadOnly};
+use objc2::MainThreadOnly;
 use objc2_app_kit::{NSButton, NSPopUpButton, NSScrollView, NSTextField, NSView};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+
+use super::list_editor::{build_list_editor, ColSpec, ListEditor};
 
 use crate::config::{
     AiConfig, AppCommandConfig, ClipboardConfig, ColorConfig, CommandConfig, Config,
@@ -16,18 +16,18 @@ use crate::config::{
     TimezoneConfig, ToggleHotkeyConfig, UiConfig, WindowConfig,
 };
 use crate::preferences::helpers::{
-    self, bool_field, button, checkbox, field, label, popup, popup_selection, scroll_wrap,
-    str_field, LABEL_W, PAD, ROW_H,
+    self, bool_field, caption, checkbox, field, hotkey_recorder, label, popup, popup_selection,
+    recorder_combo, scroll_wrap, str_field, HotkeyRecorder, LABEL_W, PAD, ROW_H,
 };
 
 /// All editable controls across tabs (filled when tabs are built).
 pub struct TabControls {
     pub web_search: Retained<NSTextField>,
+    pub launch_login: Retained<NSButton>,
     pub ui_playful: Retained<NSButton>,
     pub ui_critters: Retained<NSButton>,
-    pub hotkey_toggle: Retained<NSTextField>,
-    pub hotkey_screenshot: Retained<NSTextField>,
-    pub hotkeys_extra: Rc<RefCell<Vec<HotkeyRow>>>,
+    pub hotkey_toggle: Retained<HotkeyRecorder>,
+    pub hotkey_screenshot: Retained<HotkeyRecorder>,
     pub ai_provider: Retained<NSPopUpButton>,
     pub ai_model: Retained<NSTextField>,
     pub ai_endpoint: Retained<NSTextField>,
@@ -47,58 +47,39 @@ pub struct TabControls {
     pub pom_long: Retained<NSTextField>,
     pub pom_cycles: Retained<NSTextField>,
     pub color_max: Retained<NSTextField>,
-    pub commands: Rc<RefCell<Vec<CommandRow>>>,
-    pub app_commands: Rc<RefCell<Vec<AppCommandRow>>>,
-    pub quicklinks: Rc<RefCell<Vec<QuicklinkRow>>>,
-    pub snippets: Rc<RefCell<Vec<SnippetRow>>>,
-    pub timezones: Rc<RefCell<Vec<TimezoneRow>>>,
-}
-
-pub struct HotkeyRow {
-    pub key: Retained<NSTextField>,
-    pub kind: Retained<NSTextField>,
-    pub target: Retained<NSTextField>,
-}
-
-pub struct CommandRow {
-    pub name: Retained<NSTextField>,
-    pub keyword: Retained<NSTextField>,
-    pub kind: Retained<NSTextField>,
-    pub target: Retained<NSTextField>,
-}
-
-pub struct AppCommandRow {
-    pub keyword: Retained<NSTextField>,
-    pub name: Retained<NSTextField>,
-    pub kind: Retained<NSTextField>,
-    pub template: Retained<NSTextField>,
-}
-
-pub struct QuicklinkRow {
-    pub name: Retained<NSTextField>,
-    pub keyword: Retained<NSTextField>,
-    pub url: Retained<NSTextField>,
-}
-
-pub struct SnippetRow {
-    pub keyword: Retained<NSTextField>,
-    pub name: Retained<NSTextField>,
-    pub text: Retained<NSTextField>,
-}
-
-pub struct TimezoneRow {
-    pub name: Retained<NSTextField>,
-    pub tz: Retained<NSTextField>,
+    pub commands: RefCell<Option<Retained<ListEditor>>>,
+    pub app_commands: RefCell<Option<Retained<ListEditor>>>,
+    pub quicklinks: RefCell<Option<Retained<ListEditor>>>,
+    pub snippets: RefCell<Option<Retained<ListEditor>>>,
+    pub timezones: RefCell<Option<Retained<ListEditor>>>,
+    pub hotkeys_extra: RefCell<Option<Retained<ListEditor>>>,
+    /// Raw initial values for each list, captured at build time (the editors are
+    /// created lazily when their tab is first built).
+    pub init_commands: Vec<Vec<String>>,
+    pub init_app_commands: Vec<Vec<String>>,
+    pub init_quicklinks: Vec<Vec<String>>,
+    pub init_snippets: Vec<Vec<String>>,
+    pub init_timezones: Vec<Vec<String>>,
+    pub init_hotkeys: Vec<Vec<String>>,
 }
 
 pub fn build_controls(mtm: MainThreadMarker, config: &Config) -> TabControls {
     TabControls {
         web_search: field(mtm, &config.web_search_url, 0.0, 0.0, 400.0),
+        // Reflect the *actual* current login-item state, not just what the
+        // config last recorded (the file on disk is the source of truth).
+        launch_login: checkbox(
+            mtm,
+            "Launch litecast at login",
+            crate::login_item::is_enabled(),
+            0.0,
+            0.0,
+            300.0,
+        ),
         ui_playful: checkbox(mtm, "Playful placeholders", config.ui.playful_placeholders, 0.0, 0.0, 300.0),
         ui_critters: checkbox(mtm, "Wandering critters", config.ui.critters, 0.0, 0.0, 300.0),
-        hotkey_toggle: field(mtm, &config.hotkey.toggle, 0.0, 0.0, 300.0),
-        hotkey_screenshot: field(mtm, &config.hotkey.screenshot, 0.0, 0.0, 300.0),
-        hotkeys_extra: Rc::new(RefCell::new(Vec::new())),
+        hotkey_toggle: hotkey_recorder(mtm, &config.hotkey.toggle, 0.0, 0.0, 260.0),
+        hotkey_screenshot: hotkey_recorder(mtm, &config.hotkey.screenshot, 0.0, 0.0, 260.0),
         ai_provider: popup(
             mtm,
             &["ollama", "anthropic", "openai", "gemini", "openai-compatible"],
@@ -143,114 +124,118 @@ pub fn build_controls(mtm: MainThreadMarker, config: &Config) -> TabControls {
         ),
         pom_cycles: field(mtm, &config.pomodoro.cycles.to_string(), 0.0, 0.0, 80.0),
         color_max: field(mtm, &config.color.max_recent.to_string(), 0.0, 0.0, 80.0),
-        commands: Rc::new(RefCell::new(Vec::new())),
-        app_commands: Rc::new(RefCell::new(Vec::new())),
-        quicklinks: Rc::new(RefCell::new(Vec::new())),
-        snippets: Rc::new(RefCell::new(Vec::new())),
-        timezones: Rc::new(RefCell::new(Vec::new())),
+        commands: RefCell::new(None),
+        app_commands: RefCell::new(None),
+        quicklinks: RefCell::new(None),
+        snippets: RefCell::new(None),
+        timezones: RefCell::new(None),
+        hotkeys_extra: RefCell::new(None),
+        init_commands: config
+            .commands
+            .iter()
+            .map(|c| vec![c.name.clone(), c.keyword.clone(), c.kind.clone(), c.target.clone()])
+            .collect(),
+        init_app_commands: config
+            .app_commands
+            .iter()
+            .map(|c| vec![c.keyword.clone(), c.name.clone(), c.kind.clone(), c.template.clone()])
+            .collect(),
+        init_quicklinks: config
+            .quicklinks
+            .iter()
+            .map(|q| vec![q.name.clone(), q.keyword.clone(), q.url.clone()])
+            .collect(),
+        init_snippets: config
+            .snippets
+            .entries
+            .iter()
+            .map(|s| vec![s.keyword.clone(), s.name.clone(), s.text.clone()])
+            .collect(),
+        init_timezones: config
+            .datetime
+            .timezones
+            .iter()
+            .map(|t| vec![t.name.clone(), t.tz.clone()])
+            .collect(),
+        init_hotkeys: config
+            .hotkeys
+            .iter()
+            .map(|h| vec![h.key.clone(), h.kind.clone(), h.target.clone()])
+            .collect(),
     }
 }
 
-pub fn init_list_rows(mtm: MainThreadMarker, controls: &TabControls, config: &Config) {
-    for hk in &config.hotkeys {
-        controls.hotkeys_extra.borrow_mut().push(HotkeyRow {
-            key: field(mtm, &hk.key, 0.0, 0.0, 140.0),
-            kind: field(mtm, &hk.kind, 0.0, 0.0, 80.0),
-            target: field(mtm, &hk.target, 0.0, 0.0, 200.0),
-        });
+/// Read an editor's rows, or fall back to the captured initial values when the
+/// editor's tab was never opened (so unopened tabs still round-trip on Save).
+fn editor_rows(
+    slot: &RefCell<Option<Retained<ListEditor>>>,
+    initial: &[Vec<String>],
+) -> Vec<Vec<String>> {
+    match slot.borrow().as_ref() {
+        Some(ed) => ed.read_values(),
+        None => initial.to_vec(),
     }
-    for c in &config.commands {
-        controls.commands.borrow_mut().push(CommandRow {
-            name: field(mtm, &c.name, 0.0, 0.0, 120.0),
-            keyword: field(mtm, &c.keyword, 0.0, 0.0, 80.0),
-            kind: field(mtm, &c.kind, 0.0, 0.0, 60.0),
-            target: field(mtm, &c.target, 0.0, 0.0, 200.0),
-        });
-    }
-    for c in &config.app_commands {
-        controls.app_commands.borrow_mut().push(AppCommandRow {
-            keyword: field(mtm, &c.keyword, 0.0, 0.0, 80.0),
-            name: field(mtm, &c.name, 0.0, 0.0, 120.0),
-            kind: field(mtm, &c.kind, 0.0, 0.0, 80.0),
-            template: field(mtm, &c.template, 0.0, 0.0, 200.0),
-        });
-    }
-    for q in &config.quicklinks {
-        controls.quicklinks.borrow_mut().push(QuicklinkRow {
-            name: field(mtm, &q.name, 0.0, 0.0, 120.0),
-            keyword: field(mtm, &q.keyword, 0.0, 0.0, 80.0),
-            url: field(mtm, &q.url, 0.0, 0.0, 260.0),
-        });
-    }
-    for s in &config.snippets.entries {
-        controls.snippets.borrow_mut().push(SnippetRow {
-            keyword: field(mtm, &s.keyword, 0.0, 0.0, 80.0),
-            name: field(mtm, &s.name, 0.0, 0.0, 120.0),
-            text: field(mtm, &s.text, 0.0, 0.0, 260.0),
-        });
-    }
-    for t in &config.datetime.timezones {
-        controls.timezones.borrow_mut().push(TimezoneRow {
-            name: field(mtm, &t.name, 0.0, 0.0, 120.0),
-            tz: field(mtm, &t.tz, 0.0, 0.0, 200.0),
-        });
-    }
+}
+
+/// Get column `i` from a row, trimmed; empty if missing.
+fn col(row: &[String], i: usize) -> String {
+    row.get(i).cloned().unwrap_or_default()
 }
 
 pub fn collect_config(controls: &TabControls) -> Config {
+    let commands_rows = editor_rows(&controls.commands, &controls.init_commands);
+    let app_command_rows = editor_rows(&controls.app_commands, &controls.init_app_commands);
+    let quicklink_rows = editor_rows(&controls.quicklinks, &controls.init_quicklinks);
+    let snippet_rows = editor_rows(&controls.snippets, &controls.init_snippets);
+    let timezone_rows = editor_rows(&controls.timezones, &controls.init_timezones);
+    let hotkey_rows = editor_rows(&controls.hotkeys_extra, &controls.init_hotkeys);
+
     Config {
         web_search_url: str_field(&controls.web_search),
-        commands: controls
-            .commands
-            .borrow()
+        launch_at_login: bool_field(&controls.launch_login),
+        commands: commands_rows
             .iter()
-            .filter(|r| !str_field(&r.name).is_empty())
+            .filter(|r| !col(r, 0).is_empty())
             .map(|r| CommandConfig {
-                name: str_field(&r.name),
+                name: col(r, 0),
                 subtitle: String::new(),
-                keyword: str_field(&r.keyword),
+                keyword: col(r, 1),
                 alias: String::new(),
                 aliases: Vec::new(),
-                kind: str_field(&r.kind),
-                target: str_field(&r.target),
+                kind: col(r, 2),
+                target: col(r, 3),
             })
             .collect(),
-        app_commands: controls
-            .app_commands
-            .borrow()
+        app_commands: app_command_rows
             .iter()
-            .filter(|r| !str_field(&r.keyword).is_empty())
+            .filter(|r| !col(r, 0).is_empty())
             .map(|r| AppCommandConfig {
-                keyword: str_field(&r.keyword),
-                name: str_field(&r.name),
+                keyword: col(r, 0),
+                name: col(r, 1),
                 subtitle: String::new(),
-                kind: str_field(&r.kind),
-                template: str_field(&r.template),
+                kind: col(r, 2),
+                template: col(r, 3),
             })
             .collect(),
-        quicklinks: controls
-            .quicklinks
-            .borrow()
+        quicklinks: quicklink_rows
             .iter()
-            .filter(|r| !str_field(&r.name).is_empty())
+            .filter(|r| !col(r, 0).is_empty())
             .map(|r| QuicklinkConfig {
-                name: str_field(&r.name),
-                keyword: str_field(&r.keyword),
+                name: col(r, 0),
+                keyword: col(r, 1),
                 alias: String::new(),
                 aliases: Vec::new(),
-                url: str_field(&r.url),
+                url: col(r, 2),
             })
             .collect(),
         snippets: SnippetsConfig {
-            entries: controls
-                .snippets
-                .borrow()
+            entries: snippet_rows
                 .iter()
-                .filter(|r| !str_field(&r.text).is_empty())
+                .filter(|r| !col(r, 2).is_empty())
                 .map(|r| SnippetConfig {
-                    keyword: str_field(&r.keyword),
-                    name: str_field(&r.name),
-                    text: str_field(&r.text),
+                    keyword: col(r, 0),
+                    name: col(r, 1),
+                    text: col(r, 2),
                     paste: false,
                 })
                 .collect(),
@@ -276,34 +261,30 @@ pub fn collect_config(controls: &TabControls) -> Config {
         window: WindowConfig {
             enabled: bool_field(&controls.window_enabled),
         },
-        hotkeys: controls
-            .hotkeys_extra
-            .borrow()
+        hotkeys: hotkey_rows
             .iter()
-            .filter(|r| !str_field(&r.key).is_empty())
+            .filter(|r| !col(r, 0).is_empty())
             .map(|r| HotkeyConfig {
-                key: str_field(&r.key),
-                kind: str_field(&r.kind),
-                target: str_field(&r.target),
+                key: col(r, 0),
+                kind: col(r, 1),
+                target: col(r, 2),
             })
             .collect(),
         hotkey: ToggleHotkeyConfig {
-            toggle: str_field(&controls.hotkey_toggle),
-            screenshot: str_field(&controls.hotkey_screenshot),
+            toggle: recorder_combo(&controls.hotkey_toggle),
+            screenshot: recorder_combo(&controls.hotkey_screenshot),
         },
         notes: NotesConfig {
             file: str_field(&controls.notes_file),
             apple_notes: bool_field(&controls.notes_apple),
         },
         datetime: DateTimeConfig {
-            timezones: controls
-                .timezones
-                .borrow()
+            timezones: timezone_rows
                 .iter()
-                .filter(|r| !str_field(&r.name).is_empty())
+                .filter(|r| !col(r, 0).is_empty())
                 .map(|r| TimezoneConfig {
-                    name: str_field(&r.name),
-                    tz: str_field(&r.tz),
+                    name: col(r, 0),
+                    tz: col(r, 1),
                 })
                 .collect(),
         },
@@ -343,7 +324,7 @@ fn tab_view(
     h: f64,
     build: impl Fn(MainThreadMarker, f64) -> Retained<NSView>,
 ) -> Retained<NSScrollView> {
-    let inner = build(mtm, w - PAD * 2.0);
+    let inner = build(mtm, w);
     scroll_wrap(mtm, &inner, w, h)
 }
 
@@ -377,17 +358,15 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "name",
-                    "keyword",
-                    "kind",
-                    "target",
+                    "Custom results you can fuzzy-search by name or trigger by keyword. kind = \"open\" (file/url/app) or \"shell\". If target has {} it is replaced by text typed after the keyword.",
+                    vec![
+                        ColSpec::text("name", 1.2),
+                        ColSpec::text("keyword", 0.8),
+                        ColSpec::choice("kind", &["open", "shell"], "open", 0.7),
+                        ColSpec::text("target", 1.6),
+                    ],
                     &c.commands,
-                    |mtm| CommandRow {
-                        name: field(mtm, "", 0.0, 0.0, 120.0),
-                        keyword: field(mtm, "", 0.0, 0.0, 80.0),
-                        kind: field(mtm, "open", 0.0, 0.0, 60.0),
-                        target: field(mtm, "", 0.0, 0.0, 200.0),
-                    },
+                    &c.init_commands,
                 )
             }),
         ),
@@ -397,17 +376,15 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "keyword",
-                    "name",
-                    "kind",
-                    "template",
+                    "@keyword actions that take a free-text argument. kind = terminal / shell / applescript / open. {query} in the template is replaced by what you type after the keyword.",
+                    vec![
+                        ColSpec::text("keyword", 0.8),
+                        ColSpec::text("name", 1.0),
+                        ColSpec::choice("kind", &["terminal", "shell", "applescript", "open"], "shell", 1.0),
+                        ColSpec::text("template", 1.6),
+                    ],
                     &c.app_commands,
-                    |mtm| AppCommandRow {
-                        keyword: field(mtm, "", 0.0, 0.0, 80.0),
-                        name: field(mtm, "", 0.0, 0.0, 120.0),
-                        kind: field(mtm, "shell", 0.0, 0.0, 80.0),
-                        template: field(mtm, "", 0.0, 0.0, 200.0),
-                    },
+                    &c.init_app_commands,
                 )
             }),
         ),
@@ -417,16 +394,14 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "name",
-                    "keyword",
-                    "url",
-                    "",
+                    "Keyword \u{2192} URL shortcuts. {query} in the url is URL-encoded and substituted. Example url: https://github.com/{query} (type \"ghr rust-lang/rust\").",
+                    vec![
+                        ColSpec::text("name", 1.0),
+                        ColSpec::text("keyword", 0.8),
+                        ColSpec::text("url", 2.0),
+                    ],
                     &c.quicklinks,
-                    |mtm| QuicklinkRow {
-                        name: field(mtm, "", 0.0, 0.0, 120.0),
-                        keyword: field(mtm, "", 0.0, 0.0, 80.0),
-                        url: field(mtm, "", 0.0, 0.0, 260.0),
-                    },
+                    &c.init_quicklinks,
                 )
             }),
         ),
@@ -436,16 +411,14 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "keyword",
-                    "name",
-                    "text",
-                    "",
+                    "Reusable text snippets. Browse with the \"snip\" keyword; Enter copies the expanded text. Placeholders in text: {date} {time} {clipboard}.",
+                    vec![
+                        ColSpec::text("keyword", 0.8),
+                        ColSpec::text("name", 1.0),
+                        ColSpec::text("text", 2.0),
+                    ],
                     &c.snippets,
-                    |mtm| SnippetRow {
-                        keyword: field(mtm, "", 0.0, 0.0, 80.0),
-                        name: field(mtm, "", 0.0, 0.0, 120.0),
-                        text: field(mtm, "", 0.0, 0.0, 260.0),
-                    },
+                    &c.init_snippets,
                 )
             }),
         ),
@@ -475,15 +448,13 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "name",
-                    "tz",
-                    "",
-                    "",
+                    "Custom world-clock zones for \"time in <name>\". tz is an IANA identifier, e.g. America/New_York or Asia/Kolkata.",
+                    vec![
+                        ColSpec::text("name", 1.0),
+                        ColSpec::text("tz", 1.8),
+                    ],
                     &c.timezones,
-                    |mtm| TimezoneRow {
-                        name: field(mtm, "", 0.0, 0.0, 120.0),
-                        tz: field(mtm, "America/New_York", 0.0, 0.0, 200.0),
-                    },
+                    &c.init_timezones,
                 )
             }),
         ),
@@ -510,317 +481,372 @@ pub fn build_tab_views(
     ]
 }
 
-fn place_row(view: &NSView, fields: &[&NSTextField], y: f64, w: f64) {
-    let cols = fields.len();
-    let gap = 8.0;
-    let col_w = (w - gap * (cols as f64 - 1.0)) / cols as f64;
-    let mut x = PAD;
-    for f in fields {
-        f.setFrame(NSRect::new(
-            NSPoint::new(x, y),
-            NSSize::new(col_w, ROW_H),
+// ---------------------------------------------------------------------------
+// Top-down form builder
+//
+// All tab content lives in a flipped view (see `helpers::flipped_view`), so we
+// lay out from the top down with a simple cursor. Every section starts with a
+// gray help caption, and individual controls can carry their own caption — this
+// is the in-app, per-setting help text.
+// ---------------------------------------------------------------------------
+
+const ROW_GAP: f64 = 10.0;
+const HELP_GAP: f64 = 2.0;
+const CAP_LINE_H: f64 = 14.0;
+
+/// Approximate wrapped height for a caption rendered at ~11px across `w` points.
+fn caption_height(text: &str, w: f64) -> f64 {
+    let chars_per_line = (w / 6.2).max(12.0);
+    let lines = (text.chars().count() as f64 / chars_per_line).ceil().max(1.0);
+    lines * CAP_LINE_H + 2.0
+}
+
+struct Form {
+    mtm: MainThreadMarker,
+    view: Retained<NSView>,
+    w: f64,
+    y: f64,
+}
+
+impl Form {
+    fn new(mtm: MainThreadMarker, w: f64) -> Self {
+        let view = helpers::flipped_view(mtm, w, 4000.0);
+        Self { mtm, view, w, y: PAD }
+    }
+
+    fn add_caption(&mut self, text: &str, x: f64) {
+        let cw = self.w - x - PAD;
+        let h = caption_height(text, cw);
+        let c = caption(self.mtm, text, x, self.y, cw, h);
+        self.view.addSubview(&c);
+        self.y += h + HELP_GAP;
+    }
+
+    /// Section-level help shown under the section heading.
+    fn section_help(&mut self, text: &str) {
+        self.add_caption(text, PAD);
+        self.y += 6.0;
+    }
+
+    /// Labeled text field + optional per-field help caption.
+    fn field_row(&mut self, lbl: &str, fld: &NSTextField, fw: f64, help: &str) {
+        self.view.addSubview(&label(self.mtm, lbl, PAD, self.y, LABEL_W));
+        let avail = self.w - PAD * 2.0 - LABEL_W;
+        let width = if fw <= 0.0 { avail } else { fw.min(avail) };
+        fld.setFrame(NSRect::new(
+            NSPoint::new(PAD + LABEL_W, self.y),
+            NSSize::new(width, ROW_H),
         ));
-        view.addSubview(f);
-        x += col_w + gap;
+        self.view.addSubview(fld);
+        self.y += ROW_H + HELP_GAP;
+        if !help.is_empty() {
+            self.add_caption(help, PAD + LABEL_W);
+        }
+        self.y += ROW_GAP;
+    }
+
+    /// Labeled control (popup / recorder / any NSView) + optional help.
+    fn control_row(&mut self, lbl: &str, ctrl: &NSView, cw: f64, help: &str) {
+        self.view.addSubview(&label(self.mtm, lbl, PAD, self.y, LABEL_W));
+        ctrl.setFrame(NSRect::new(
+            NSPoint::new(PAD + LABEL_W, self.y),
+            NSSize::new(cw, ROW_H),
+        ));
+        self.view.addSubview(ctrl);
+        self.y += ROW_H + HELP_GAP;
+        if !help.is_empty() {
+            self.add_caption(help, PAD + LABEL_W);
+        }
+        self.y += ROW_GAP;
+    }
+
+    /// Checkbox spanning the row + optional help indented under its label.
+    fn checkbox_row(&mut self, cb: &NSButton, help: &str) {
+        cb.setFrame(NSRect::new(
+            NSPoint::new(PAD, self.y),
+            NSSize::new(self.w - PAD * 2.0, ROW_H),
+        ));
+        self.view.addSubview(cb);
+        self.y += ROW_H + HELP_GAP;
+        if !help.is_empty() {
+            self.add_caption(help, PAD + 22.0);
+        }
+        self.y += ROW_GAP;
+    }
+
+    fn finish(self) -> Retained<NSView> {
+        self.view
+            .setFrameSize(NSSize::new(self.w, self.y + PAD));
+        self.view
     }
 }
 
 fn general_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 200.0);
-    let mut y = 120.0;
-    view.addSubview(&label(mtm, "Web search URL", PAD, y, LABEL_W));
-    c.web_search
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(w - PAD * 2.0 - LABEL_W, ROW_H),
-        ));
-    view.addSubview(&c.web_search);
-    y -= ROW_H + 12.0;
-    c.ui_playful
-        .setFrame(NSRect::new(NSPoint::new(PAD, y), NSSize::new(300.0, ROW_H)));
-    view.addSubview(&c.ui_playful);
-    y -= ROW_H + 8.0;
-    c.ui_critters
-        .setFrame(NSRect::new(NSPoint::new(PAD, y), NSSize::new(300.0, ROW_H)));
-    view.addSubview(&c.ui_critters);
-    view.setFrameSize(NSSize::new(w, 160.0));
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help("General launcher behaviour and startup.");
+    f.field_row(
+        "Web search URL",
+        &c.web_search,
+        0.0,
+        "Opened by the \"Search the web\" fallback. {} is replaced by your query. Example: https://duckduckgo.com/?q={}",
+    );
+    f.checkbox_row(
+        &c.launch_login,
+        "Start litecast automatically after you log in (installs a per-user LaunchAgent). Takes effect on next login.",
+    );
+    f.checkbox_row(
+        &c.ui_playful,
+        "Show rotating, playful placeholder text in the search field.",
+    );
+    f.checkbox_row(
+        &c.ui_critters,
+        "Occasionally let small animated critters wander across the panel. Purely cosmetic.",
+    );
+    f.finish()
 }
 
 fn hotkeys_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 400.0);
-    let mut y = 360.0;
-    for (lbl, fld) in [
-        ("Toggle panel", &c.hotkey_toggle),
-        ("Screenshot", &c.hotkey_screenshot),
-    ] {
-        view.addSubview(&label(mtm, lbl, PAD, y, LABEL_W));
-        fld.setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(280.0, ROW_H),
-        ));
-        view.addSubview(fld);
-        y -= ROW_H + 10.0;
-    }
-    view.addSubview(&label(
-        mtm,
-        "Custom hotkeys (key / kind / target)",
+    let mut f = Form::new(mtm, w);
+    f.section_help(
+        "Global shortcuts. Click a recorder, then press your combo (at least one modifier: \u{2318} \u{2325} \u{2303} \u{21e7}). Esc cancels, \u{232b} clears.",
+    );
+    f.control_row(
+        "Toggle panel",
+        &c.hotkey_toggle,
+        260.0,
+        "Show/hide the launcher. Default \u{2325}Space. To use \u{2318}Space, first disable Spotlight's shortcut in System Settings \u{25b8} Keyboard \u{25b8} Keyboard Shortcuts \u{25b8} Spotlight.",
+    );
+    f.control_row(
+        "Screenshot",
+        &c.hotkey_screenshot,
+        260.0,
+        "Capture a screen region and ask the AI about it. Default \u{2325}\u{21e7}Space.",
+    );
+    f.add_caption(
+        "Custom global hotkeys. key is a combo like Cmd+Shift+G. kind = open (url/app), shell, or command (a Commands entry). target is the url/command/command-name.",
         PAD,
-        y,
-        w - PAD * 2.0,
-    ));
-    y -= ROW_H + 6.0;
-    for row in c.hotkeys_extra.borrow().iter() {
-        place_row(&view, &[&row.key, &row.kind, &row.target], y, w);
-        y -= ROW_H + 6.0;
-    }
-    view.setFrameSize(NSSize::new(w, (360.0 - y + 40.0).max(120.0)));
-    view
+    );
+    f.y += 4.0;
+
+    let (editor, doc) = build_list_editor(
+        mtm,
+        w,
+        vec![
+            ColSpec::text("key", 1.0),
+            ColSpec::choice("kind", &["open", "shell", "command"], "open", 0.8),
+            ColSpec::text("target", 2.0),
+        ],
+        c.init_hotkeys.clone(),
+    );
+    let band_h = content_band_height(c.init_hotkeys.len()).clamp(140.0, 380.0);
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, f.y), NSSize::new(w, band_h)),
+    );
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(false);
+    scroll.setDocumentView(Some(&doc));
+    f.view.addSubview(&scroll);
+    f.y += band_h + ROW_GAP;
+    *c.hotkeys_extra.borrow_mut() = Some(editor);
+
+    f.finish()
 }
 
 fn ai_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 220.0);
-    let mut y = 180.0;
-    view.addSubview(&label(mtm, "Provider", PAD, y, LABEL_W));
-    c.ai_provider
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(200.0, ROW_H),
-        ));
-    view.addSubview(&c.ai_provider);
-    y -= ROW_H + 10.0;
-    view.addSubview(&label(mtm, "Model", PAD, y, LABEL_W));
-    c.ai_model
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(280.0, ROW_H),
-        ));
-    view.addSubview(&c.ai_model);
-    y -= ROW_H + 10.0;
-    view.addSubview(&label(mtm, "Endpoint", PAD, y, LABEL_W));
-    c.ai_endpoint
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(w - PAD * 2.0 - LABEL_W, ROW_H),
-        ));
-    view.addSubview(&c.ai_endpoint);
-    y -= ROW_H + 16.0;
-    let hint = label(
-        mtm,
-        "API keys are stored in Keychain, not config.toml. Use litecast setkey or Set API key in the launcher.",
-        PAD,
-        y,
-        w - PAD * 2.0,
+    let mut f = Form::new(mtm, w);
+    f.section_help("Backend for ? questions, screenshot questions, and quick AI commands (translate / summarize / fix / improve).");
+    f.control_row(
+        "Provider",
+        &c.ai_provider,
+        200.0,
+        "anthropic, openai, gemini, openai-compatible, or ollama (local, no key needed).",
     );
-    view.addSubview(&hint);
-    view.setFrameSize(NSSize::new(w, 200.0));
-    view
+    f.field_row(
+        "Model",
+        &c.ai_model,
+        280.0,
+        "Model id for the provider, e.g. claude-3-5-sonnet, gpt-4o, gemini-2.5-flash, or llama3.2 (Ollama).",
+    );
+    f.field_row(
+        "Endpoint",
+        &c.ai_endpoint,
+        0.0,
+        "Override base URL. Leave empty for hosted providers; for Ollama use http://127.0.0.1:11434.",
+    );
+    f.add_caption(
+        "API keys are stored in the macOS Keychain, never in config.toml. Set one with \"setkey <key>\" (or \"setup\") in the launcher.",
+        PAD,
+    );
+    f.finish()
 }
 
 fn clipboard_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    simple_two_row(mtm, w, &c.clipboard_keep, "Max images", &c.clipboard_max, 80.0)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Clipboard history (\"clip\" keyword). Pin entries with \"clip pin <n>\".");
+    f.checkbox_row(
+        &c.clipboard_keep,
+        "Capture images copied to the clipboard (stored under the support directory).",
+    );
+    f.field_row(
+        "Max images",
+        &c.clipboard_max,
+        80.0,
+        "How many captured images to keep before old ones are dropped (pinned images are exempt).",
+    );
+    f.finish()
 }
 
 fn conversion_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 80.0);
-    view.addSubview(&label(mtm, "Currency cache TTL (hours)", PAD, 40.0, LABEL_W));
-    c.conversion_ttl
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, 40.0),
-            NSSize::new(80.0, ROW_H),
-        ));
-    view.addSubview(&c.conversion_ttl);
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help("Unit & currency conversion, e.g. \"10 km in mi\", \"100 usd to eur\".");
+    f.field_row(
+        "Currency cache TTL (hours)",
+        &c.conversion_ttl,
+        80.0,
+        "How long cached exchange rates are reused before refreshing from the public rates API.",
+    );
+    f.finish()
 }
 
 fn window_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    checkbox_only(mtm, w, &c.window_enabled)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Window management (\"win\" commands, e.g. \"win left\", \"win max\").");
+    f.checkbox_row(
+        &c.window_enabled,
+        "Enable window snapping/resizing. This is the only feature that needs the Accessibility permission; macOS prompts on first use. Off by default.",
+    );
+    f.finish()
 }
 
 fn menu_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    checkbox_only(mtm, w, &c.menu_enabled)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Menu-bar search (\"menu\" keyword): list and trigger the frontmost app's menu items.");
+    f.checkbox_row(
+        &c.menu_enabled,
+        "Enable menu-bar search. Needs the Accessibility permission (prompts on first use). Off by default.",
+    );
+    f.finish()
 }
 
 fn notes_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 120.0);
-    view.addSubview(&label(mtm, "Notes file", PAD, 80.0, LABEL_W));
-    c.notes_file
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, 80.0),
-            NSSize::new(280.0, ROW_H),
-        ));
-    view.addSubview(&c.notes_file);
-    c.notes_apple
-        .setFrame(NSRect::new(NSPoint::new(PAD, 44.0), NSSize::new(300.0, ROW_H)));
-    view.addSubview(&c.notes_apple);
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help("Quick notes: \"note <text>\" appends a timestamped line; \"note\" opens the file.");
+    f.field_row(
+        "Notes file",
+        &c.notes_file,
+        280.0,
+        "Relative paths resolve under the support dir; absolute paths are used as-is. Empty = notes.txt in the support dir.",
+    );
+    f.checkbox_row(
+        &c.notes_apple,
+        "Also create a note in Apple Notes on each capture (asks for Automation permission the first time).",
+    );
+    f.finish()
 }
 
 fn scripts_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    single_field_tab(mtm, w, "Scripts directory", &c.scripts_dir)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Drop executable scripts in this folder and they appear as runnable commands (with optional @litecast.* header metadata).");
+    f.field_row(
+        "Scripts directory",
+        &c.scripts_dir,
+        0.0,
+        "Relative paths resolve under the support dir; absolute used as-is. Empty = scripts/ in the support dir.",
+    );
+    f.finish()
 }
 
 fn git_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 100.0);
-    view.addSubview(&label(mtm, "Scan dirs (comma-separated)", PAD, 60.0, LABEL_W));
-    c.git_scan
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, 60.0),
-            NSSize::new(w - PAD * 2.0 - LABEL_W, ROW_H),
-        ));
-    view.addSubview(&c.git_scan);
-    view.addSubview(&label(mtm, "Max depth", PAD, 24.0, LABEL_W));
-    c.git_depth
-        .setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, 24.0),
-            NSSize::new(80.0, ROW_H),
-        ));
-    view.addSubview(&c.git_depth);
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help("Git helper (\"git\" / \"repo\"): list and open recent repositories.");
+    f.field_row(
+        "Scan dirs (comma-separated)",
+        &c.git_scan,
+        0.0,
+        "Folders scanned for repositories, e.g. ~/Developer, ~/work. Empty = ~/Developer ~/Projects ~/Code ~/src.",
+    );
+    f.field_row(
+        "Max depth",
+        &c.git_depth,
+        80.0,
+        "How many directory levels deep to look for a .git folder.",
+    );
+    f.finish()
 }
 
 fn newfile_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    single_field_tab(mtm, w, "Base directory", &c.newfile_base)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Quick file/folder creation: \"new file <name>\", \"new folder <name>\".");
+    f.field_row(
+        "Base directory",
+        &c.newfile_base,
+        0.0,
+        "Where relative names are created. Empty = ~/Desktop (else your home folder).",
+    );
+    f.finish()
 }
 
 fn pomodoro_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 160.0);
-    let rows = [
-        ("Work (min)", &c.pom_work),
-        ("Break (min)", &c.pom_break),
-        ("Long break (min)", &c.pom_long),
-        ("Cycles", &c.pom_cycles),
-    ];
-    let mut y = 120.0;
-    for (lbl, fld) in rows {
-        view.addSubview(&label(mtm, lbl, PAD, y, LABEL_W));
-        fld.setFrame(NSRect::new(
-            NSPoint::new(PAD + LABEL_W, y),
-            NSSize::new(80.0, ROW_H),
-        ));
-        view.addSubview(fld);
-        y -= ROW_H + 8.0;
-    }
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help("Pomodoro / focus timer (\"pomodoro\", or \"focus 50\" to override work length). Durations in minutes.");
+    f.field_row("Work (min)", &c.pom_work, 80.0, "Length of each focus session.");
+    f.field_row("Break (min)", &c.pom_break, 80.0, "Short break after a work session.");
+    f.field_row("Long break (min)", &c.pom_long, 80.0, "Longer break after a full set of cycles.");
+    f.field_row("Cycles", &c.pom_cycles, 80.0, "Work sessions to complete before a long break.");
+    f.finish()
 }
 
 fn color_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
-    single_field_tab(mtm, w, "Max recent colors", &c.color_max)
+    let mut f = Form::new(mtm, w);
+    f.section_help("Screen color picker (\"pick color\"). Recently picked colors are listed under \"colors\".");
+    f.field_row(
+        "Max recent colors",
+        &c.color_max,
+        80.0,
+        "How many recently picked colors to remember.",
+    );
+    f.finish()
 }
 
-fn checkbox_only(mtm: MainThreadMarker, w: f64, cb: &NSButton) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 60.0);
-    cb.setFrame(NSRect::new(NSPoint::new(PAD, 20.0), NSSize::new(400.0, ROW_H)));
-    view.addSubview(cb);
-    view
-}
-
-fn single_field_tab(
+/// Generic editable list section: help caption + an embedded `ListEditor` with
+/// ＋ Add / Remove. The editor is stored back into `slot` so Save can read it.
+fn list_tab(
     mtm: MainThreadMarker,
     w: f64,
-    lbl: &str,
-    fld: &NSTextField,
+    help: &str,
+    cols: Vec<ColSpec>,
+    slot: &RefCell<Option<Retained<ListEditor>>>,
+    initial: &[Vec<String>],
 ) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 60.0);
-    view.addSubview(&label(mtm, lbl, PAD, 20.0, LABEL_W));
-    fld.setFrame(NSRect::new(
-        NSPoint::new(PAD + LABEL_W, 20.0),
-        NSSize::new(w - PAD * 2.0 - LABEL_W, ROW_H),
-    ));
-    view.addSubview(fld);
-    view
+    let mut f = Form::new(mtm, w);
+    f.section_help(help);
+
+    let (editor, doc) = build_list_editor(mtm, w, cols, initial.to_vec());
+
+    // Give the editor a generous fixed-height band. The editor's own `doc` is the
+    // scroll's documentView, so as Add/Remove resizes `doc` the scroll updates
+    // its content automatically — rows never clip and the section stays stable.
+    let band_h = content_band_height(initial.len()).clamp(160.0, 460.0);
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, f.y), NSSize::new(w, band_h)),
+    );
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(true);
+    scroll.setDrawsBackground(false);
+    scroll.setDocumentView(Some(&doc));
+    f.view.addSubview(&scroll);
+    f.y += band_h + ROW_GAP;
+
+    *slot.borrow_mut() = Some(editor);
+    f.finish()
 }
 
-fn simple_two_row(
-    mtm: MainThreadMarker,
-    w: f64,
-    cb: &NSButton,
-    lbl2: &str,
-    fld2: &NSTextField,
-    fw: f64,
-) -> Retained<NSView> {
-    let view = helpers::container(mtm, w, 90.0);
-    cb.setFrame(NSRect::new(NSPoint::new(PAD, 50.0), NSSize::new(400.0, ROW_H)));
-    view.addSubview(cb);
-    view.addSubview(&label(mtm, lbl2, PAD, 16.0, LABEL_W));
-    fld2.setFrame(NSRect::new(
-        NSPoint::new(PAD + LABEL_W, 16.0),
-        NSSize::new(fw, ROW_H),
-    ));
-    view.addSubview(fld2);
-    view
-}
-
-/// Generic list editor tab (3–4 columns).
-fn list_tab<T>(
-    mtm: MainThreadMarker,
-    w: f64,
-    h1: &str,
-    h2: &str,
-    h3: &str,
-    h4: &str,
-    rows: &Rc<RefCell<Vec<T>>>,
-    _new_row: impl Fn(MainThreadMarker) -> T,
-) -> Retained<NSView>
-where
-    T: ListRow,
-{
-    let mut height = 40.0 + rows.borrow().len() as f64 * (ROW_H + 6.0);
-    height = height.max(80.0);
-    let view = helpers::container(mtm, w, height);
-    let mut y = height - 30.0;
-    let headers = [h1, h2, h3, h4].into_iter().filter(|s| !s.is_empty());
-    let ncol = [h1, h2, h3, h4].iter().filter(|s| !s.is_empty()).count();
-    if ncol > 0 {
-        let gap = 8.0;
-        let col_w = (w - PAD * 2.0 - gap * (ncol as f64 - 1.0)) / ncol as f64;
-        let mut x = PAD;
-        for h in headers {
-            let lbl = label(mtm, h, x, y, col_w);
-            view.addSubview(&lbl);
-            x += col_w + gap;
-        }
-        y -= ROW_H + 8.0;
-    }
-    for row in rows.borrow().iter() {
-        row.place(&view, y, w);
-        y -= ROW_H + 6.0;
-    }
-    view.setFrameSize(NSSize::new(w, height));
-    view
-}
-
-pub trait ListRow {
-    fn place(&self, view: &NSView, y: f64, w: f64);
-}
-
-impl ListRow for CommandRow {
-    fn place(&self, view: &NSView, y: f64, w: f64) {
-        place_row(view, &[&self.name, &self.keyword, &self.kind, &self.target], y, w);
-    }
-}
-impl ListRow for AppCommandRow {
-    fn place(&self, view: &NSView, y: f64, w: f64) {
-        place_row(
-            view,
-            &[&self.keyword, &self.name, &self.kind, &self.template],
-            y,
-            w,
-        );
-    }
-}
-impl ListRow for QuicklinkRow {
-    fn place(&self, view: &NSView, y: f64, w: f64) {
-        place_row(view, &[&self.name, &self.keyword, &self.url], y, w);
-    }
-}
-impl ListRow for SnippetRow {
-    fn place(&self, view: &NSView, y: f64, w: f64) {
-        place_row(view, &[&self.keyword, &self.name, &self.text], y, w);
-    }
-}
-impl ListRow for TimezoneRow {
-    fn place(&self, view: &NSView, y: f64, w: f64) {
-        place_row(view, &[&self.name, &self.tz], y, w);
-    }
+/// Visible height for a list editor band given its initial row count.
+fn content_band_height(rows: usize) -> f64 {
+    // add button + header + rows, with headroom for a few added rows.
+    let base = ROW_H * 2.0 + 24.0;
+    base + ((rows + 3) as f64) * (ROW_H + 6.0)
 }

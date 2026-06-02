@@ -6,10 +6,12 @@ mod color_pick;
 mod config;
 mod critters;
 mod currency;
+mod debug_log;
 mod engine;
 mod engine_setup;
 mod frecency;
 mod hotkeys;
+mod login_item;
 mod menu_ax;
 mod menu_cache;
 mod model;
@@ -25,16 +27,16 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Mutex};
 
-use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
+use objc2::{class, define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSBackingStoreType,
     NSAnimationContext, NSBezelStyle, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSBox,
     NSBoxType, NSButton, NSButtonType,
-    NSColor, NSControl, NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
+    NSColor, NSControl, NSEvent, NSEventMask, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeight,
     NSFontWeightMedium, NSFontWeightRegular, NSImage, NSImageView, NSLayoutConstraint, NSPanel, NSPasteboard,
     NSPasteboardTypePNG, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSScreen, NSScrollView, NSTableColumn, NSTableHeaderView,
@@ -52,7 +54,7 @@ use objc2_foundation::{
 
 use ai::ChatMsg;
 use clipboard::History;
-use config::{AiConfig, AppCommandConfig};
+use config::AppCommandConfig;
 use engine::{fuzzy_score, Filter};
 use frecency::Frecency;
 use model::{Action, Item};
@@ -373,6 +375,9 @@ struct Ivars {
     /// litecast itself frontmost). -1 when unknown.
     prev_app_pid: Cell<i32>,
     app_state: Arc<app_state::AppState>,
+    /// Keeps Carbon global hotkeys alive for the delegate lifetime (must not live
+    /// only in AppState — that regressed Option+Space after the settings shell work).
+    _hotkey_manager: RefCell<Option<GlobalHotKeyManager>>,
 }
 
 define_class!(
@@ -387,8 +392,88 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
+            // DEBUG-TEMP: prove whether the delegate callback is ever invoked.
+            debug_log::log(
+                "applicationDidFinishLaunching",
+                "ENTER",
+                r#"{"note":"delegate callback fired"}"#,
+            );
             let mtm = MainThreadMarker::new().expect("main thread");
             app_shell::install(mtm, self as &AnyObject);
+            // DEBUG-TEMP: Regular activation policy needs a live app event target.
+            self.ensure_hotkeys_registered("applicationDidFinishLaunching");
+            // A GUI launch of the .app bundle (Finder/Apps/Dock) should open the
+            // Settings window, matching the user's expectation that launching the
+            // listed app shows its settings. A bare terminal run of the debug
+            // binary does NOT auto-open settings, so devs can exercise the
+            // Option+Space launcher without the window getting in the way.
+            if launched_from_app_bundle() {
+                debug_log::log(
+                    "applicationDidFinishLaunching",
+                    "launch path decided: settings (.app bundle GUI launch)",
+                    "{}",
+                );
+                activation_present_settings(self, "applicationDidFinishLaunching");
+            } else {
+                debug_log::log(
+                    "applicationDidFinishLaunching",
+                    "launch path decided: launcher (terminal/dev run; no auto-open)",
+                    "{}",
+                );
+            }
+            debug_log::log("applicationDidFinishLaunching", "EXIT", "{}");
+        }
+
+        /// Dock icon click (or Finder "Reopen") while the app is already running.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(
+            &self,
+            _sender: &NSApplication,
+            has_visible_windows: bool,
+        ) -> bool {
+            debug_log::log(
+                "applicationShouldHandleReopen",
+                "Dock/Finder reopen",
+                &format!(
+                    r#"{{"has_visible_windows":{has_visible_windows},"panel_visible":{}}}"#,
+                    self.ivars().visible.get(),
+                ),
+            );
+            // Standard macOS behavior: clicking the Dock icon (or Finder "Reopen")
+            // shows the app's main window — here that is the Settings window. We do
+            // NOT pop the search launcher; that is reserved for Option+Space and
+            // the menu-bar "Open litecast" item.
+            debug_log::log(
+                "applicationShouldHandleReopen",
+                "launch path decided: settings (Dock/Finder reopen)",
+                "{}",
+            );
+            activation_present_settings(self, "applicationShouldHandleReopen");
+            true
+        }
+
+        /// Finder/.app launch or Cmd+Tab back to litecast (not used for bare CLI runs).
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            debug_log::log(
+                "applicationDidBecomeActive",
+                "app activated",
+                &format!(
+                    r#"{{"panel_visible":{},"app_bundle":{}}}"#,
+                    self.ivars().visible.get(),
+                    launched_from_app_bundle(),
+                ),
+            );
+            // Intentionally do NOT present any window here. The GUI-launch case is
+            // handled once in applicationDidFinishLaunching (opens Settings) and
+            // Dock reopens are handled in applicationShouldHandleReopen. Presenting
+            // here would both double-pop a window on first launch and annoyingly
+            // re-open a window on every Cmd+Tab back into the app.
+            debug_log::log(
+                "applicationDidBecomeActive",
+                "no auto-present (handled by finishLaunching / reopen)",
+                "{}",
+            );
         }
     }
 
@@ -414,14 +499,33 @@ define_class!(
     }
 
     impl AppDelegate {
+        // DEBUG-TEMP: fired once shortly after run() starts; proves the main run
+        // loop is alive and dispatching timers/selectors.
+        #[unsafe(method(runLoopProbe))]
+        fn run_loop_probe(&self) {
+            debug_log::log(
+                "runLoopProbe",
+                "main run loop is pumping",
+                r#"{"note":"timers + performSelectorOnMainThread will be delivered"}"#,
+            );
+        }
+
         // Invoked on the main thread from the hotkey listener thread.
         #[unsafe(method(toggleFromHotkey))]
         fn toggle_from_hotkey(&self) {
+            // DEBUG-TEMP
+            debug_log::log(
+                "toggleFromHotkey",
+                "selector on main thread",
+                &format!(r#"{{"visible_before":{}}}"#, self.ivars().visible.get()),
+            );
             self.toggle();
         }
 
         #[unsafe(method(openPreferences:))]
         fn open_preferences(&self, _sender: Option<&AnyObject>) {
+            // DEBUG-TEMP
+            debug_log::log("openPreferences:", "menu item clicked", "{}");
             let mtm = MainThreadMarker::new().expect("main thread");
             let ptr = std::ptr::from_ref(self) as usize;
             preferences::show(mtm, self.ivars().app_state.clone(), ptr);
@@ -454,9 +558,45 @@ define_class!(
             }
         }
 
+        // One-shot safety net: re-assert key window + search-field focus on the
+        // runloop turn AFTER show(). Fixes the "panel appears over Mission
+        // Control but won't accept typing" case: by the time this fires the
+        // system has dismissed Mission Control, so the panel can finally become
+        // key and the field editor receives keystrokes. No-op if already hidden.
+        #[unsafe(method(ensurePanelKey))]
+        fn ensure_panel_key(&self) {
+            let ivars = self.ivars();
+            if !ivars.visible.get() {
+                return;
+            }
+            let app = NSApplication::sharedApplication(self.mtm());
+            app.activate();
+            let is_key: bool = unsafe { msg_send![&*ivars.panel, isKeyWindow] };
+            if !is_key {
+                ivars.panel.orderFrontRegardless();
+                unsafe {
+                    let _: () = msg_send![&*ivars.panel, makeKeyWindow];
+                }
+            }
+            focus_search_field(&ivars.panel, &ivars.search);
+        }
+
         // NSSearchField text changed: dispatch the query to the worker thread.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, _notification: &NSNotification) {
+            // DEBUG-TEMP
+            let ivars = self.ivars();
+            let q = ivars.search.stringValue().to_string();
+            debug_log::log(
+                "controlTextDidChange",
+                "entry",
+                &format!(
+                    r#"{{"query_len":{},"expanded":{},"visible":{}}}"#,
+                    q.len(),
+                    ivars.panel_expanded.get(),
+                    ivars.visible.get(),
+                ),
+            );
             self.dispatch_query();
         }
 
@@ -700,8 +840,129 @@ define_class!(
 );
 
 impl AppDelegate {
+    /// Register global hotkeys once the NSApplication event target is live.
+    fn ensure_hotkeys_registered(&self, reason: &str) {
+        self.register_hotkeys(reason, false);
+    }
+
+    /// Register or replace global hotkeys. When `replace` is false, skips if already
+    /// registered. When `replace` is true, swaps in a new manager only on success so
+    /// a failed prefs save cannot leave the app with no hotkeys.
+    fn register_hotkeys(&self, reason: &str, replace: bool) {
+        let ivars = self.ivars();
+        if !replace && ivars._hotkey_manager.borrow().is_some() {
+            // DEBUG-TEMP
+            debug_log::log(
+                "register_hotkeys",
+                "skip (already registered)",
+                &format!(r#"{{"reason":"{reason}"}}"#),
+            );
+            return;
+        }
+        let cfg = match ivars.app_state.config.read() {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                eprintln!("[litecast] hotkey registration skipped: config read failed: {e}");
+                debug_log::log(
+                    "register_hotkeys",
+                    "config read failed",
+                    &format!(r#"{{"reason":"{reason}","error":"{e}"}}"#),
+                );
+                return;
+            }
+        };
+
+        // CRITICAL: drop the existing GlobalHotKeyManager BEFORE creating a new
+        // one. Each manager installs a Carbon event handler / registers the
+        // combos; if the old one is still alive when we build the replacement,
+        // creating the new manager (or re-registering the same combo) fails with
+        // "Resource temporarily unavailable (os error 35)". Setting the slot to
+        // None here runs Drop, releasing the Carbon handler and unregistering the
+        // old hotkeys, so the fresh manager starts from a clean slate.
+        let had_previous = ivars._hotkey_manager.borrow().is_some();
+        *ivars._hotkey_manager.borrow_mut() = None;
+
+        match hotkeys::register_all(&cfg) {
+            Ok((manager, ids)) => {
+                if let Ok(mut slot) = ivars.app_state.last_hotkey_error.lock() {
+                    *slot = None;
+                }
+                // DEBUG-TEMP
+                debug_log::log(
+                    "register_hotkeys",
+                    "success",
+                    &format!(
+                        r#"{{"reason":"{reason}","replace":{replace},"toggle_combo":"{}","toggle_id":{},"screenshot_id":{}}}"#,
+                        cfg.hotkey.toggle, ids.toggle, ids.screenshot,
+                    ),
+                );
+                *ivars._hotkey_manager.borrow_mut() = Some(manager);
+                match ivars.app_state.hotkey_ids.lock() {
+                    Ok(mut slot) => *slot = ids,
+                    Err(e) => {
+                        eprintln!(
+                            "[litecast] hotkeys registered but hotkey_ids update failed: {e}"
+                        );
+                        debug_log::log(
+                            "register_hotkeys",
+                            "hotkey_ids lock failed",
+                            &format!(r#"{{"reason":"{reason}"}}"#),
+                        );
+                    }
+                }
+                if reason == "applicationDidFinishLaunching"
+                    || reason == "main:post_finishLaunching"
+                {
+                    eprintln!(
+                        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
+                        cfg.hotkey.toggle
+                    );
+                } else if replace {
+                    eprintln!(
+                        "[litecast] global hotkeys updated ({} to toggle)",
+                        cfg.hotkey.toggle
+                    );
+                }
+            }
+            Err(e) => {
+                let msg = format!(
+                    "Couldn't register the global hotkeys.\n\n{e}\n\nLikely causes:\n\u{2022} The shortcut is already in use by another app — for example \u{2318}Space is owned by Spotlight by default. Free it in System Settings \u{25b8} Keyboard \u{25b8} Keyboard Shortcuts, then try again, or pick another combo.\n\u{2022} Another copy of litecast may already be running and holding the shortcut. Quit the other instance (menu bar \u{2318} \u{25b8} Quit) and Save again.\n\nThe launcher hotkey is not active until this is resolved; you can still open litecast from the menu bar \u{2318} icon."
+                );
+                if let Ok(mut slot) = ivars.app_state.last_hotkey_error.lock() {
+                    *slot = Some(msg);
+                }
+                eprintln!("[litecast] failed to register global hotkeys ({reason}): {e}");
+                if had_previous {
+                    eprintln!(
+                        "[litecast] previous hotkey bindings were released; no hotkeys are active until re-registration succeeds"
+                    );
+                } else {
+                    eprintln!(
+                        "[litecast] launcher will not respond to {}; use the menu bar item instead",
+                        cfg.hotkey.toggle
+                    );
+                }
+                // DEBUG-TEMP
+                debug_log::log(
+                    "register_hotkeys",
+                    "register_all failed",
+                    &format!(r#"{{"reason":"{reason}","replace":{replace},"had_previous":{had_previous},"error":"{e}"}}"#),
+                );
+            }
+        }
+    }
+
     fn toggle(&self) {
         let visible = self.ivars().visible.get();
+        // DEBUG-TEMP
+        debug_log::log(
+            "toggle",
+            "called",
+            &format!(
+                r#"{{"visible_before":{visible},"will":"{}"}}"#,
+                if visible { "hide" } else { "show" },
+            ),
+        );
         if visible {
             self.hide_and_reset();
         } else {
@@ -748,7 +1009,17 @@ impl AppDelegate {
     fn sync_panel_expansion(&self, animated: bool) {
         let want = self.wants_panel_expanded();
         let ivars = self.ivars();
-        if ivars.panel_expanded.get() == want {
+        let was = ivars.panel_expanded.get();
+        // DEBUG-TEMP
+        debug_log::log(
+            "sync_panel_expansion",
+            "entry",
+            &format!(
+                r#"{{"was_expanded":{was},"want":{want},"animated":{animated},"changed":{}}}"#,
+                was != want,
+            ),
+        );
+        if was == want {
             return;
         }
         ivars.panel_expanded.set(want);
@@ -796,6 +1067,8 @@ impl AppDelegate {
 
     fn show(&self) {
         let ivars = self.ivars();
+        // DEBUG-TEMP
+        debug_log::log("show", "entry", &format!(r#"{{"visible_before":{}}}"#, ivars.visible.get()));
 
         // Remember which app was frontmost before we steal focus, so window
         // commands can target its window rather than litecast's own panel.
@@ -847,12 +1120,80 @@ impl AppDelegate {
         }
 
         let app = NSApplication::sharedApplication(self.mtm());
+        // Activate the app so the (NonactivatingPanel) launcher can become key.
+        // During Mission Control / Exposé the system holds the active state, so
+        // a single activate+makeKeyAndOrderFront can land the panel on screen
+        // WITHOUT it becoming key — the visible-but-can't-type symptom. We use
+        // the modern `activate` (which is more reliable than the deprecated
+        // ignoringOtherApps variant) and re-assert key + first responder again
+        // on the next runloop turn (see `ensure_panel_key` scheduled below),
+        // after Mission Control has had a chance to dismiss.
+        app.activate();
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
 
+        // DEBUG-TEMP: report the panel geometry/screen BEFORE ordering front so a
+        // zero-size or off-screen frame is obvious.
+        {
+            let f = ivars.panel.frame();
+            let screen_count = NSScreen::screens(self.mtm()).count();
+            let on_screen: bool = unsafe { msg_send![&*ivars.panel, isOnActiveSpace] };
+            debug_log::log(
+                "show",
+                "pre-order geometry",
+                &format!(
+                    r#"{{"x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"screens":{},"isOnActiveSpace":{}}}"#,
+                    f.origin.x, f.origin.y, f.size.width, f.size.height, screen_count, on_screen,
+                ),
+            );
+        }
+
         ivars.panel.makeKeyAndOrderFront(None);
+        // orderFrontRegardless ensures we surface above other apps' windows even
+        // when our app isn't the active one yet (e.g. invoked over Mission
+        // Control or another app's fullscreen space).
+        ivars.panel.orderFrontRegardless();
+        // Force the borderless panel to become key NOW (makeKeyAndOrderFront
+        // does not always make a NonactivatingPanel key on its own).
+        unsafe {
+            let _: () = msg_send![&*ivars.panel, makeKeyWindow];
+        }
         focus_search_field(&ivars.panel, &ivars.search);
         ivars.visible.set(true);
+
+        // Re-assert key window + first responder on the next runloop turn. When
+        // the toggle hotkey fires during Mission Control / Exposé, the panel can
+        // appear before the system finishes dismissing that mode, leaving it
+        // non-key (visible but won't accept typing). A 0-delay timer runs after
+        // the current event completes — by then Mission Control is gone and the
+        // panel reliably takes keyboard focus. Harmless in the normal case.
+        let reassert_target: &AnyObject = self;
+        let _key_guard = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.0,
+                reassert_target,
+                sel!(ensurePanelKey),
+                None,
+                false,
+            )
+        };
+        // DEBUG-TEMP: post-order state — is the window actually visible, key, and
+        // on a real screen with non-zero alpha?
+        {
+            let f = ivars.panel.frame();
+            let is_visible: bool = unsafe { msg_send![&*ivars.panel, isVisible] };
+            let is_key: bool = unsafe { msg_send![&*ivars.panel, isKeyWindow] };
+            let alpha: f64 = unsafe { msg_send![&*ivars.panel, alphaValue] };
+            let has_screen = ivars.panel.screen().is_some();
+            debug_log::log(
+                "show",
+                "panel visible",
+                &format!(
+                    r#"{{"isVisible":{is_visible},"isKeyWindow":{is_key},"alphaValue":{alpha:.3},"hasScreen":{has_screen},"x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1}}}"#,
+                    f.origin.x, f.origin.y, f.size.width, f.size.height,
+                ),
+            );
+        }
         // Select the entire existing query so typing replaces it (Spotlight-style),
         // while arrow keys still navigate results without clearing it.
         self.select_all_search();
@@ -895,13 +1236,21 @@ impl AppDelegate {
     }
 
     /// Called after Preferences saves; runtime reads go through `app_state.config`.
-    fn sync_runtime_from_config(&self) {}
+    fn sync_runtime_from_config(&self) {
+        // DEBUG-TEMP
+        debug_log::log("sync_runtime_from_config", "entry", "re-register hotkeys");
+        self.register_hotkeys("sync_runtime_from_config", true);
+    }
 
     fn hide_and_reset(&self) {
         let ivars = self.ivars();
         if !ivars.visible.get() {
+            // DEBUG-TEMP
+            debug_log::log("hide_and_reset", "skip (already hidden)", "");
             return;
         }
+        // DEBUG-TEMP
+        debug_log::log("hide_and_reset", "hiding panel", "");
         ivars.panel.orderOut(None);
         ivars.visible.set(false);
         ivars.pending_confirm.set(-1);
@@ -1826,6 +2175,15 @@ impl AppDelegate {
             NSPoint::new(0.0, 0.0),
             NSSize::new(PANEL_WIDTH, total_h),
         ));
+        // DEBUG-TEMP
+        let scroll_h = results_h + RESULTS_SCROLL_BOTTOM_INSET;
+        debug_log::log(
+            "layout",
+            "applied",
+            &format!(
+                r#"{{"expanded":{expanded},"animated":{animated},"growing":{growing},"animate_resize":{animate_resize},"total_h":{total_h},"search_frame":{{"x":{text_x},"y":{search_y},"w":{search_w},"h":{search_h}}},"scroll_frame":{{"x":0.0,"y":{RESULTS_BOTTOM_PAD},"w":{PANEL_WIDTH},"h":{scroll_h}}}}}"#,
+            ),
+        );
     }
 }
 
@@ -2772,12 +3130,78 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     }
 }
 
+/// True when running as `Something.app/Contents/MacOS/litecast` (Finder/Dock launch).
+fn launched_from_app_bundle() -> bool {
+    let exe = std::env::current_exe();
+    let result = exe
+        .as_ref()
+        .ok()
+        .is_some_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
+    // DEBUG-TEMP: log the exact exe path so we know WHICH binary/app launched
+    // (bundled .app vs. bare terminal binary vs. a stale .app copy).
+    debug_log::log(
+        "launched_from_app_bundle",
+        "current_exe",
+        &format!(
+            r#"{{"exe":{:?},"is_app_bundle":{}}}"#,
+            exe.map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|e| format!("<error: {e}>")),
+            result,
+        ),
+    );
+    result
+}
+
+/// Open (or raise) the Settings window when the user launches/reopens the .app.
+///
+/// This is the GUI-launch and Dock-reopen entry point. The search launcher is
+/// intentionally NOT shown here; it remains bound to Option+Space and the
+/// menu-bar "Open litecast" item. `preferences::show` already raises an existing
+/// Settings window and activates the app frontmost (activateIgnoringOtherApps +
+/// orderFrontRegardless), so it wins over the floating launcher panel (level 25).
+fn activation_present_settings(delegate: &AppDelegate, reason: &str) {
+    debug_log::log(reason, "presenting Settings window", "{}");
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let ptr = std::ptr::from_ref(delegate) as usize;
+    preferences::show(mtm, delegate.ivars().app_state.clone(), ptr);
+}
+
 fn main() {
-    eprintln!("[litecast] starting...");
+    debug_log::init(); // DEBUG-TEMP
+    // DEBUG-TEMP: startup banner. Compiled out in release builds so a shipped
+    // binary writes nothing to stderr.
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("[litecast] starting (global hotkeys register after launch)…");
+        for path in debug_log::paths() {
+            eprintln!("[litecast] debug log: {}", path.display());
+        }
+    }
+    // DEBUG-TEMP
+    debug_log::log("main", "startup", r#"{"phase":"begin"}"#);
+    // DEBUG-TEMP: which binary launched us + pid. A GUI Spotlight/Launchpad launch
+    // shows a `.app/Contents/MacOS/litecast` path; a bare `cargo run`/terminal run
+    // shows `target/<profile>/litecast`. There is NO single-instance guard in this
+    // app, so a second launch starts a second process — UNLESS macOS LaunchServices
+    // sees an instance with the same CFBundleIdentifier already running and just
+    // reactivates it (then no new "main startup" line appears here at all).
+    debug_log::log(
+        "main",
+        "exe + pid",
+        &format!(
+            r#"{{"exe":{:?},"pid":{}}}"#,
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|e| format!("<error: {e}>")),
+            std::process::id(),
+        ),
+    );
     let open_prefs = std::env::args().any(|a| a == "--preferences" || a == "-preferences");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // DEBUG-TEMP
+    debug_log::log("main", "activation_policy", r#"{"policy":"Regular"}"#);
 
     let views = build_panel(mtm);
     let PanelViews {
@@ -2815,11 +3239,16 @@ fn main() {
     let frecency = Frecency::load();
     let app_state = Arc::new(
         app_state::AppState::new(config.clone(), history.clone(), frecency.clone())
-            .unwrap_or_else(|e| panic!("hotkey setup failed: {e}")),
+            .unwrap_or_else(|e| panic!("app state setup failed: {e}")),
     );
-    eprintln!(
-        "[litecast] ready; press {} to toggle the panel (Cmd+1..9 selects a category)",
-        config.hotkey.toggle
+    // DEBUG-TEMP
+    debug_log::log(
+        "main",
+        "config hotkey",
+        &format!(
+            r#"{{"toggle":"{}","screenshot":"{}"}}"#,
+            config.hotkey.toggle, config.hotkey.screenshot,
+        ),
     );
 
     let ivars = Ivars {
@@ -2859,6 +3288,7 @@ fn main() {
         pending_confirm: Cell::new(-1),
         prev_app_pid: Cell::new(-1),
         app_state: app_state.clone(),
+        _hotkey_manager: RefCell::new(None),
     };
 
     let delegate: Retained<AppDelegate> = {
@@ -2926,16 +3356,63 @@ fn main() {
         });
     }
 
+    // DEBUG-TEMP: heartbeat thread proves the listener is alive and *blocked in
+    // recv()* (vs. the thread having died or never reaching recv). If heartbeats
+    // keep printing but no "event received" line appears when you press the
+    // hotkey, the OS is simply not delivering the Carbon hotkey event.
+    std::thread::spawn(move || {
+        let mut n: u64 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            n += 1;
+            debug_log::log(
+                "hotkey_heartbeat",
+                "alive",
+                &format!(r#"{{"tick":{n},"hint":"press the hotkey now; expect an 'event received' line"}}"#),
+            );
+        }
+    });
+
     // Hotkey listener: blocks when idle (zero CPU) and bounces onto the main thread.
     let hotkey_ids = app_state.hotkey_ids.clone();
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
+        // DEBUG-TEMP
+        debug_log::log(
+            "hotkey_thread",
+            "started",
+            r#"{"detail":"listening","note":"receiver channel acquired"}"#,
+        );
         while let Ok(event) = receiver.recv() {
+            // DEBUG-TEMP
+            debug_log::log(
+                "hotkey_thread",
+                "event received",
+                &format!(
+                    r#"{{"id":{},"state":"{:?}"}}"#,
+                    event.id, event.state,
+                ),
+            );
             if event.state != HotKeyState::Pressed {
                 continue;
             }
             let ids = hotkey_ids.lock().ok();
-            let Some(ids) = ids else { continue };
+            let Some(ids) = ids else {
+                debug_log::log("hotkey_thread", "ids lock failed", "");
+                continue;
+            };
+            // DEBUG-TEMP
+            debug_log::log(
+                "hotkey_thread",
+                "matching",
+                &format!(
+                    r#"{{"event_id":{},"toggle_id":{},"screenshot_id":{},"custom_count":{}}}"#,
+                    event.id,
+                    ids.toggle,
+                    ids.screenshot,
+                    ids.custom.len(),
+                ),
+            );
             if let Some(action) = ids.custom.get(&event.id) {
                 action.execute();
                 continue;
@@ -2945,8 +3422,24 @@ fn main() {
             } else if event.id == ids.toggle {
                 sel!(toggleFromHotkey)
             } else {
+                debug_log::log(
+                    "hotkey_thread",
+                    "unmatched id",
+                    &format!(r#"{{"event_id":{}}}"#, event.id),
+                );
                 continue;
             };
+            // DEBUG-TEMP
+            let sel_name = if event.id == ids.screenshot {
+                "captureScreenshot"
+            } else {
+                "toggleFromHotkey"
+            };
+            debug_log::log(
+                "hotkey_thread",
+                "dispatch main thread",
+                &format!(r#"{{"selector":"{sel_name}"}}"#),
+            );
             let ptr = delegate_addr as *const AnyObject;
             unsafe {
                 let obj: &AnyObject = &*ptr;
@@ -2989,5 +3482,80 @@ fn main() {
         preferences::show(mtm, app_state, delegate_addr);
     }
 
+    // DEBUG-TEMP: A global NSEvent monitor reports whether the Option+Space
+    // keystroke reaches THIS process at all while another app is focused. This
+    // distinguishes "OS never sends us the key" (e.g. another app/system owns the
+    // shortcut, or Input Monitoring is denied → this logs nothing) from "key
+    // arrives but the global-hotkey Carbon handler isn't firing" (this logs but
+    // the hotkey_thread does not). NB: a global monitor never swallows the event.
+    {
+        let mask = NSEventMask::KeyDown | NSEventMask::FlagsChanged;
+        let handler = block2::RcBlock::new(move |event: core::ptr::NonNull<NSEvent>| {
+            let event = unsafe { event.as_ref() };
+            let etype = event.r#type();
+            let key_code = event.keyCode();
+            let flags = event.modifierFlags().0 as u64;
+            // DEBUG-TEMP
+            debug_log::log(
+                "global_event_monitor",
+                "key event seen by process",
+                &format!(
+                    r#"{{"type":"{etype:?}","keyCode":{key_code},"modifierFlags":{flags}}}"#
+                ),
+            );
+        });
+        let monitor: Option<Retained<AnyObject>> = unsafe {
+            msg_send![
+                class!(NSEvent),
+                addGlobalMonitorForEventsMatchingMask: mask,
+                handler: &*handler,
+            ]
+        };
+        // DEBUG-TEMP
+        debug_log::log(
+            "global_event_monitor",
+            "install result",
+            &format!(
+                r#"{{"installed":{},"note":"if this stays installed=true but no 'key event seen' lines appear on keypress, the OS is not routing the key to us (Input Monitoring permission or another owner)"}}"#,
+                monitor.is_some()
+            ),
+        );
+        // Leak the monitor token so AppKit keeps delivering for the whole session.
+        if let Some(monitor) = monitor {
+            std::mem::forget(monitor);
+        }
+    }
+
+    // DEBUG-TEMP: one-shot timer confirms the NSApplication run loop is actually
+    // pumping (if this never logs, run() isn't servicing the main run loop, which
+    // would also explain missing delegate callbacks and Carbon hotkey events).
+    let _runloop_probe = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            0.5,
+            &*delegate,
+            sel!(runLoopProbe),
+            None,
+            false,
+        )
+    };
+
+    // Finish launch synchronously so the Carbon application event target exists,
+    // then register global hotkeys (applicationDidFinishLaunching does the same;
+    // the explicit call covers launch paths where the delegate callback is deferred).
+    // DEBUG-TEMP
+    debug_log::log("main", "pre finishLaunching", "{}");
+    app.finishLaunching();
+    // DEBUG-TEMP
+    debug_log::log(
+        "main",
+        "post finishLaunching",
+        &format!(r#"{{"app_running":{}}}"#, unsafe {
+            let running: bool = msg_send![&*app, isRunning];
+            running
+        }),
+    );
+    (&*delegate).ensure_hotkeys_registered("main:post_finishLaunching");
+    // DEBUG-TEMP
+    debug_log::log("main", "entering run loop", r#"{"note":"app.run() about to block"}"#);
     app.run();
 }

@@ -8,6 +8,7 @@ use global_hotkey::{
 };
 
 use crate::config::{CommandConfig, Config, HotkeyConfig};
+use crate::debug_log;
 use crate::model::Action;
 
 /// Live hotkey ids used by the background listener thread.
@@ -174,6 +175,18 @@ pub fn register_all(
         .map_err(|e| format!("screenshot hotkey: {e}"))?;
     ids.toggle = toggle_hotkey.id();
     ids.screenshot = shot_hotkey.id();
+    // DEBUG-TEMP
+    debug_log::log(
+        "hotkeys::register_all",
+        "built-in registered",
+        &format!(
+            r#"{{"toggle_combo":"{}","toggle_id":{},"screenshot_combo":"{}","screenshot_id":{}}}"#,
+            config.hotkey.toggle,
+            ids.toggle,
+            config.hotkey.screenshot,
+            ids.screenshot,
+        ),
+    );
 
     for hk in &config.hotkeys {
         let Some(parsed) = parse_hotkey_combo(&hk.key) else {
