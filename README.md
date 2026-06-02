@@ -14,19 +14,25 @@ toggles the panel; the Dock icon and menu bar are there for discoverability and 
 
 ## Screenshots
 
-The borderless search launcher with category filters and a web-search fallback:
+The borderless search launcher with category filters, showing app and file
+results for a fuzzy query:
 
-![litecast launcher panel with category filters and a web-search result](assets/screenshot-launcher.png)
+![litecast launcher panel with app search results for "arc" and category filters](assets/screenshot-launcher.png)
 
-The native, resizable Settings window — a tabbed sidebar covering every config
-section, with per-setting help captions:
+Ask the AI right from the launcher — type `? your question` to query your local
+Ollama model (or any configured provider):
 
-![litecast Settings window showing the General tab](assets/screenshot-settings.png)
+![litecast launcher offering "Ask Ollama (local)" for a "? hey how are you" query](assets/screenshot-ai-ask.png)
 
-The same Settings window with the sidebar layout and the App commands section
-selected:
+The AI answer renders inline, and you can keep typing to continue the chat with
+a follow-up prompt:
 
-![litecast Settings sidebar with the App commands section](assets/screenshot-app-commands.png)
+![litecast showing an AI answer with a follow-up prompt field](assets/screenshot-ai-answer.png)
+
+The native, resizable Settings window — here on the AI tab, with the provider
+set to Ollama and a local model:
+
+![litecast Settings window on the AI tab with provider ollama and model llama3.2:3b](assets/screenshot-settings.png)
 
 ## Goals
 
