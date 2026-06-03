@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::config::AiConfig;
@@ -117,8 +119,126 @@ fn ollama_base(endpoint: &str) -> String {
     }
 }
 
+/// Quick reachability probe against the Ollama endpoint. Hits `GET /api/tags`
+/// with a short timeout; returns true only on a real HTTP response (any
+/// status), false on connect/timeout errors.
+fn ollama_reachable(base: &str) -> bool {
+    let url = format!("{base}/api/tags");
+    let reachable = ureq::get(&url)
+        .config()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_millis(800)))
+        .build()
+        .call()
+        .is_ok();
+    crate::debug_log::log(
+        "ai::ollama",
+        "reachability_check",
+        &format!(r#"{{"base":"{base}","reachable":{reachable}}}"#),
+    );
+    reachable
+}
+
+/// Resolve the `ollama` binary. A GUI `.app` launched from Finder inherits a
+/// minimal PATH (often `/usr/bin:/bin`), so the Homebrew install locations are
+/// checked explicitly before falling back to a bare `ollama` (PATH lookup).
+fn resolve_ollama_binary() -> Option<String> {
+    const CANDIDATES: &[&str] = &["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"];
+    for path in CANDIDATES {
+        if std::path::Path::new(path).exists() {
+            return Some((*path).to_string());
+        }
+    }
+    // Fall back to PATH lookup via `which`-style probing of the inherited PATH.
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let candidate = std::path::Path::new(dir).join("ollama");
+            if candidate.exists() {
+                return candidate.to_str().map(str::to_string);
+            }
+        }
+    }
+    None
+}
+
+/// Ensure the Ollama server is reachable before sending a request. If it is not
+/// running, attempt to start `ollama serve` as a detached background process
+/// and poll for readiness. Returns a human-readable error if Ollama is not
+/// installed or could not be started within the bounded window.
+///
+/// Bounded everywhere: the reachability probe and readiness polls use short
+/// timeouts, so this never hangs the caller (the AI worker thread).
+fn ensure_ollama_running(base: &str) -> Result<(), String> {
+    if ollama_reachable(base) {
+        return Ok(());
+    }
+
+    let binary = match resolve_ollama_binary() {
+        Some(b) => b,
+        None => {
+            crate::debug_log::log(
+                "ai::ollama",
+                "spawn_skipped",
+                r#"{"reason":"binary_not_found"}"#,
+            );
+            return Err("Ollama is not installed - see https://ollama.com".to_string());
+        }
+    };
+
+    crate::debug_log::log(
+        "ai::ollama",
+        "spawn_attempt",
+        &format!(r#"{{"binary":"{binary}"}}"#),
+    );
+
+    use std::process::{Command, Stdio};
+    let spawn_result = Command::new(&binary)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    match spawn_result {
+        Ok(_child) => {
+            // Detach: drop the handle without waiting. `ollama serve` keeps
+            // running independently; macOS reaps it via launchd-style orphan
+            // adoption, so no zombie is left behind for litecast.
+        }
+        Err(e) => {
+            crate::debug_log::log(
+                "ai::ollama",
+                "spawn_failed",
+                &format!(r#"{{"binary":"{binary}","error":"{e}"}}"#),
+            );
+            return Err(format!("Couldn't start Ollama: {e}"));
+        }
+    }
+
+    // Poll for readiness with bounded backoff (~6s total worst case).
+    for attempt in 0..12 {
+        std::thread::sleep(Duration::from_millis(500));
+        if ollama_reachable(base) {
+            crate::debug_log::log(
+                "ai::ollama",
+                "readiness_poll",
+                &format!(r#"{{"ready":true,"attempt":{attempt}}}"#),
+            );
+            return Ok(());
+        }
+    }
+
+    crate::debug_log::log("ai::ollama", "readiness_poll", r#"{"ready":false}"#);
+    Err("Couldn't start Ollama (server did not become ready)".to_string())
+}
+
 fn ask_ollama(config: &AiConfig, history: &[ChatMsg]) -> Result<String, String> {
     let mut cfg = config.clone();
+    // Make sure the local server is up before we list models or send the
+    // request. This runs on the AI worker thread (see ask_chat callers), never
+    // the main thread, and only for an actual submitted query - not while the
+    // user is typing or browsing the AI setup page.
+    ensure_ollama_running(&ollama_base(&cfg.endpoint))?;
     if cfg.model.is_empty() {
         cfg.model = list_ollama_models(&cfg.endpoint)?
             .into_iter()
