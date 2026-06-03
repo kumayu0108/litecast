@@ -6,7 +6,7 @@ use accessibility_sys::{
     AXUIElementRef,
 };
 use core_foundation::array::{CFArray, CFArrayRef};
-use core_foundation::base::{CFType, CFTypeRef, TCFType};
+use core_foundation::base::{CFRetain, CFType, CFTypeRef, TCFType};
 use core_foundation::string::CFString;
 
 /// A menu path like `["File", "Save"]` for display and activation.
@@ -81,6 +81,9 @@ fn walk_menu(el: AXUIElementRef, path: Vec<String>, out: &mut Vec<MenuEntry>, ma
     }
     for child in copy_children(el) {
         walk_menu(child, path.clone(), out, max);
+        // `copy_children` hands back a +1 retain on each element; release it
+        // once we are done recursing so we don't leak.
+        unsafe { CFType::wrap_under_create_rule(child as CFTypeRef) };
         if out.len() >= max {
             break;
         }
@@ -90,12 +93,19 @@ fn walk_menu(el: AXUIElementRef, path: Vec<String>, out: &mut Vec<MenuEntry>, ma
 fn find_child_by_title(parent: AXUIElementRef, title: &str) -> Option<AXUIElementRef> {
     for child in copy_children(parent) {
         if element_title(child).as_deref() == Some(title) {
+            // Transfer the +1 retain to the caller (it wraps under create rule).
             return Some(child);
         }
+        // Not a match: release the +1 retain handed back by `copy_children`.
+        unsafe { CFType::wrap_under_create_rule(child as CFTypeRef) };
     }
     None
 }
 
+/// Copy the children of `el`. Each returned element carries a +1 retain that
+/// the caller is responsible for releasing; the elements are explicitly
+/// retained so they outlive the temporary children array (whose release would
+/// otherwise free them and leave dangling `AXUIElementRef`s).
 fn copy_children(el: AXUIElementRef) -> Vec<AXUIElementRef> {
     let mut out = Vec::new();
     let Some(value) = copy_attr_value(el, kAXChildrenAttribute) else {
@@ -107,6 +117,7 @@ fn copy_children(el: AXUIElementRef) -> Vec<AXUIElementRef> {
         if let Some(item) = arr.get(i) {
             let ptr = *item;
             if !ptr.is_null() {
+                unsafe { CFRetain(ptr) };
                 out.push(ptr as AXUIElementRef);
             }
         }

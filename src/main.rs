@@ -1699,11 +1699,11 @@ impl AppDelegate {
     fn run_window_op(&self, op: model::WindowOp) {
         let ivars = self.ivars();
         if !window::trusted(false) {
-            // Trigger the standard system prompt the first time.
+            // Trigger the standard system prompt (no-op if already prompted).
             window::trusted(true);
             self.show_status_row(
                 "Accessibility permission needed",
-                "Grant litecast access in System Settings \u{203a} Privacy & Security \u{203a} Accessibility, then run the command again",
+                "Open Privacy \u{203a} Accessibility. If litecast is already listed, the app was re-signed since you granted it \u{2014} select litecast, click \u{2212} to remove it, then re-add this app and toggle it on. Quit and reopen litecast, then try again.",
                 Action::Open(
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                         .to_string(),
@@ -1741,7 +1741,7 @@ impl AppDelegate {
             window::trusted(true);
             self.show_status_row(
                 "Accessibility permission needed",
-                "Grant litecast access in System Settings, then try again",
+                "Open Privacy \u{203a} Accessibility. If litecast is already listed, the app was re-signed \u{2014} remove it with \u{2212}, re-add this app, toggle it on, then quit and reopen litecast and try again.",
                 Action::Open(
                     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                         .to_string(),
@@ -3335,10 +3335,18 @@ fn main() {
                     query = q;
                     filter = f;
                 }
-                let items = engine
-                    .read()
-                    .map(|e| e.query(&query, filter))
-                    .unwrap_or_default();
+                // Provider queries run here, off the main thread, once per
+                // keystroke. A panic in any provider must never take down the
+                // GUI process, so we isolate the whole query with catch_unwind
+                // and degrade to empty results. (Requires `panic = "unwind"`;
+                // see the release profile in Cargo.toml.)
+                let items = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine
+                        .read()
+                        .map(|e| e.query(&query, filter))
+                        .unwrap_or_default()
+                }))
+                .unwrap_or_default();
                 if let Ok(mut slot) = pending.lock() {
                     *slot = Some((generation, items));
                 }

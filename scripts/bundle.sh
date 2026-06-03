@@ -75,32 +75,82 @@ if [ ! -x "$APP/Contents/MacOS/litecast" ]; then
     exit 1
 fi
 
-# Ad-hoc codesign with a STABLE identifier.
+# Codesign with a STABLE code identity.
 #
-# litecast stores AI API keys in the macOS Keychain. The Keychain ties an
-# "Always Allow" decision to the calling binary's *code identity*. An unsigned
-# binary (or one signed with a different/ephemeral identity on each build) gets
-# a new identity every launch, so macOS re-prompts for Keychain access every
-# time. Signing ad-hoc (`--sign -`) with a fixed `--identifier` gives the
-# bundled app a consistent code identity across runs, so a single "Always Allow"
-# sticks for the bundled app.
+# Two macOS permissions are tied to the app's *code identity* (its designated
+# requirement, DR): the Keychain "Always Allow" decision for API keys, and —
+# crucially — the **Accessibility (TCC)** grant that window management needs.
 #
-# This is best-effort: if `codesign` is unavailable the bundle is still usable
-# (it will simply re-prompt), so we don't fail the build on a signing error.
+# With pure ad-hoc signing (`--sign -`), the DR is just `cdhash H"..."`, i.e. the
+# hash of THIS exact binary. Every rebuild changes the binary, changes the
+# cdhash, and therefore changes the DR. macOS then treats the freshly-built app
+# as a *different* app than the one you authorized: the old "litecast" row stays
+# visible and toggled on in System Settings, but AXIsProcessTrusted() returns
+# false because the current binary's DR no longer matches the authorized one.
+# That is the infamous "re-grant Accessibility after every rebuild" problem.
+#
+# The robust fix is to sign with a STABLE self-signed certificate. When signed
+# with a named identity, the DR becomes roughly
+#   identifier "com.litecast.app" and certificate leaf = H"<cert hash>"
+# which depends on the certificate, NOT the binary hash — so it stays constant
+# across rebuilds and the Accessibility/Keychain grants keep applying.
+#
+# Selection order:
+#   1. $LITECAST_SIGN_ID  — explicit identity name (overrides everything).
+#   2. a self-signed cert named "litecast-dev" in the keychain (auto-detected).
+#   3. ad-hoc fallback (`--sign -`) — works, but see the re-grant caveat above.
+#
+# To create the stable cert once (no admin needed), see scripts/make-signing-cert.sh
+# or run: ./scripts/make-signing-cert.sh
 IDENTIFIER="com.litecast.app"
 ENTITLEMENTS="bundle/litecast.entitlements"
-echo "Codesigning $APP (ad-hoc, identifier=$IDENTIFIER)"
-if [ -f "$ENTITLEMENTS" ]; then
-    codesign --force --deep --sign - \
-        --identifier "$IDENTIFIER" \
-        --entitlements "$ENTITLEMENTS" \
-        "$APP" 2>/dev/null \
-    || codesign --force --deep --sign - --identifier "$IDENTIFIER" "$APP" \
-    || echo "warning: codesign failed; the app will re-prompt for Keychain access each launch"
-else
-    codesign --force --deep --sign - --identifier "$IDENTIFIER" "$APP" \
-    || echo "warning: codesign failed; the app will re-prompt for Keychain access each launch"
+STABLE_CERT_NAME="litecast-dev"
+
+SIGN_ID="${LITECAST_SIGN_ID:-}"
+if [ -z "$SIGN_ID" ]; then
+    # Auto-detect a stable self-signed identity that is valid for code signing.
+    if security find-identity -p codesigning 2>/dev/null | grep -q "\"$STABLE_CERT_NAME\""; then
+        SIGN_ID="$STABLE_CERT_NAME"
+    fi
 fi
+
+# sign_with: run codesign with the given identity; echo nothing, return status.
+sign_with() {
+    _id="$1"
+    if [ -f "$ENTITLEMENTS" ]; then
+        codesign --force --deep --sign "$_id" \
+            --identifier "$IDENTIFIER" --entitlements "$ENTITLEMENTS" "$APP" 2>/dev/null \
+        || codesign --force --deep --sign "$_id" --identifier "$IDENTIFIER" "$APP" 2>/dev/null
+    else
+        codesign --force --deep --sign "$_id" --identifier "$IDENTIFIER" "$APP" 2>/dev/null
+    fi
+}
+
+SIGNED_MODE="ad-hoc"
+if [ -n "$SIGN_ID" ]; then
+    echo "Codesigning $APP (stable identity: $SIGN_ID, identifier=$IDENTIFIER)"
+    if sign_with "$SIGN_ID"; then
+        SIGNED_MODE="stable"
+    else
+        echo "warning: signing with \"$SIGN_ID\" failed (key not authorized for codesign?)." >&2
+        echo "         Falling back to ad-hoc. See: ./scripts/make-signing-cert.sh" >&2
+    fi
+fi
+
+if [ "$SIGNED_MODE" != "stable" ]; then
+    echo "Codesigning $APP (ad-hoc, identifier=$IDENTIFIER)"
+    sign_with - || echo "warning: codesign failed; the app may re-prompt for Keychain/Accessibility access"
+    echo "  note: ad-hoc signatures change every rebuild, so macOS may require you to" >&2
+    echo "        re-authorize Accessibility (remove litecast with '-', then re-add) after" >&2
+    echo "        each bundle. To sign with a STABLE identity and avoid that, run once:" >&2
+    echo "            ./scripts/make-signing-cert.sh" >&2
+fi
+
+# Report the designated requirement so the signing mode is visible at a glance.
+# A stable identity yields an `... and certificate leaf = H"..."` DR (constant
+# across rebuilds); ad-hoc yields `cdhash H"..."` (changes every rebuild).
+DR="$(codesign -dr - "$APP" 2>&1 | sed -n 's/^#* *designated => //p')"
+[ -n "$DR" ] && echo "  designated requirement: $DR"
 
 # Local dev: clear Gatekeeper quarantine so `open` works without right-click > Open.
 xattr -cr "$APP" 2>/dev/null || true

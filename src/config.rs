@@ -499,12 +499,21 @@ impl Default for ToggleHotkeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WindowConfig {
-    /// Window management uses the Accessibility permission, so it is opt-in and
-    /// OFF by default. When false, the window commands are not registered at all.
+    /// Window management uses the Accessibility permission. The provider only
+    /// *lists* commands when enabled; the permission prompt and any AX calls are
+    /// deferred until the user actually runs a window command, so enabling this
+    /// by default never triggers a prompt on its own. When false, the window
+    /// commands are not registered at all.
     pub enabled: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

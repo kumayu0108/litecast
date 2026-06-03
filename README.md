@@ -181,7 +181,7 @@ Open the panel and start typing:
 - Type `clip` to browse clipboard history (`clip foo` to filter; `clip pin <n>` to pin). Links open, images re-copy.
 - Type `bm <query>` to search browser bookmarks, or `hist <query>` for browser history.
 - Type `kill` or `ps` (optionally `kill safari`) to list processes; `Enter`, then `Enter` again, sends SIGTERM.
-- Enable `[window] enabled = true`, then type `win` (e.g. `win left`, `win max`) to snap the frontmost window (needs Accessibility).
+- Type `win` (e.g. `win left`, `win right`, `win max`) to snap the frontmost window (needs Accessibility; enabled by default, disable with `[window] enabled = false`).
 - Type `? your question` to ask the configured AI backend, then keep typing to continue the chat (Esc exits chat).
 - Quick AI commands: `translate`/`tr`, `summarize`/`sum`, `fixgrammar`/`fix`, `improve` (use an argument or the clipboard).
 - Type `setup` for a guided AI-key walkthrough, or `setkey <api-key>` to store the API key for the active AI backend in the Keychain.
@@ -288,12 +288,28 @@ if the optional [`blueutil`](https://github.com/toy/blueutil) CLI is installed.
 - The screenshot feature uses the built-in `screencapture`, which requires the
   **Screen Recording** permission (macOS prompts on first use).
 - The AI feature needs outbound network access.
-- **Window management is the only feature that needs Accessibility, and it is
-  off by default.** Set `[window] enabled = true` to surface the `win` commands;
-  the first time you run one, macOS prompts you to grant litecast access under
+- **Window management is the only feature that needs Accessibility.** It is
+  enabled by default, but the AX permission prompt is deferred: the `win`
+  commands list immediately, and only running one triggers the prompt. Set
+  `[window] enabled = false` to hide the commands entirely. The
+  first time you run one, macOS prompts you to grant litecast access under
   **System Settings › Privacy & Security › Accessibility**. litecast never
   prompts for Accessibility unless you both enable the section and trigger a
   window command, and it stays fully functional if you never grant it.
+- **Re-granting Accessibility after a rebuild (ad-hoc signing).** macOS ties the
+  Accessibility grant to the app's code signature. `scripts/bundle.sh` signs
+  ad-hoc by default, and an ad-hoc signature changes on every rebuild, so a
+  freshly rebuilt `litecast.app` looks like a *different* app to macOS: the old
+  entry still shows in the Accessibility list (toggled on), but the new binary is
+  not actually trusted and window commands report "Accessibility permission
+  needed". Fix: in **System Settings › Privacy & Security › Accessibility**,
+  select litecast, click **−** to remove the stale entry, re-add
+  `target/litecast.app` with **+**, toggle it on, then quit and relaunch litecast.
+  To avoid doing this on every rebuild, run `./scripts/make-signing-cert.sh`
+  once to create a stable self-signed signing identity; `bundle.sh` then signs
+  with a certificate-based designated requirement that stays constant across
+  rebuilds, so the grant keeps applying (you re-grant only once, after switching
+  from ad-hoc to the stable identity).
 - The process manager (`kill` / `ps`) only touches your own user's processes and
   needs no permission.
 

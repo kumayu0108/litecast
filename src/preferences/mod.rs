@@ -351,6 +351,16 @@ pub fn show(
             defer: false,
         ]
     };
+    // NSWindow created via `initWithContentRect:` defaults to
+    // `releasedWhenClosed = true`: AppKit sends an extra `release` to the window
+    // when the user clicks the red close button. That extra release is invisible
+    // to our `Retained<NSWindow>`, so closing the Settings window would
+    // over-release it and leave a dangling pointer. PREFS keeps the controller
+    // (and thus this `window` ivar) alive after a close, so the next Dock/Finder
+    // reopen would call `makeKeyAndOrderFront` on freed memory and crash with an
+    // `objc_msgSend` use-after-free. Opt out so the window's lifetime is owned
+    // solely by our `Retained` handle.
+    unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("litecast Settings"));
     window.setContentMinSize(NSSize::new(MIN_W, MIN_H));
     if let Some(content) = window.contentView() {

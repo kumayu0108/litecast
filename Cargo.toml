@@ -102,5 +102,9 @@ features = [
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# Keep unwinding (NOT abort) so a panic on the background query worker can be
+# caught (see catch_unwind in the query worker) and degrade to empty results
+# instead of aborting the whole GUI process. With `panic = "abort"` a single
+# provider panic during typing killed the app with nothing logged.
+panic = "unwind"
 strip = true
