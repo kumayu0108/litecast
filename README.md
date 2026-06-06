@@ -272,7 +272,8 @@ and wandering-critter GIFs go in `.../litecast/critters/`. The support dir also
 holds learned usage (`usage.json`) and cached currency rates (`currency.json`).
 
 See [docs/features.md](docs/features.md) for the full list of keywords and
-config sections.
+config sections, and [docs/security.md](docs/security.md) for trust boundaries
+and security hardening.
 
 ### System command permissions
 

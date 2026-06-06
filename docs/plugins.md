@@ -47,7 +47,7 @@ Fields per item:
 - `subtitle` (optional): secondary text.
 - `action` (optional, default `open`): one of
   - `open` - open `target` as a file, folder, app, or URL (`/usr/bin/open`).
-  - `shell` - run `target` with `/bin/sh -c`.
+  - `shell` - run `target` with `/bin/sh -c`. Requires a second Enter to confirm.
   - `copy` - copy `target` to the clipboard.
   - `none` - informational only.
 - `target` (optional): argument for the action.

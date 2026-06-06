@@ -64,7 +64,14 @@ impl Provider for PluginProvider {
 
         for (index, item) in parsed.items.into_iter().enumerate() {
             let action = match item.action.as_str() {
-                "shell" => Action::RunShell(item.target.clone()),
+                "shell" => {
+                    let cmd = item.target.clone();
+                    let label = truncate_cmd(&plugin.keyword, &cmd);
+                    Action::Confirm {
+                        label,
+                        inner: Box::new(Action::RunShell(cmd)),
+                    }
+                }
                 "copy" => Action::CopyText(item.target.clone()),
                 "none" => Action::None,
                 _ => Action::Open(item.target.clone()),
@@ -100,6 +107,16 @@ struct PluginItem {
 
 fn default_action() -> String {
     "open".to_string()
+}
+
+fn truncate_cmd(plugin: &str, cmd: &str) -> String {
+    let max = 60;
+    let truncated = if cmd.chars().count() > max {
+        format!("{}…", cmd.chars().take(max).collect::<String>())
+    } else {
+        cmd.to_string()
+    };
+    format!("Run shell command from {plugin}: {truncated}")
 }
 
 fn discover() -> Vec<PluginEntry> {

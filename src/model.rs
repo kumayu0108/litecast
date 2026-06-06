@@ -181,6 +181,9 @@ impl Action {
     pub fn execute(&self) -> bool {
         match self {
             Action::Open(target) => {
+                if target.contains("://") && !crate::security::url::is_safe_open_url(target) {
+                    return false;
+                }
                 let _ = std::process::Command::new("/usr/bin/open")
                     .arg(target)
                     .spawn();
@@ -376,6 +379,9 @@ fn run_capture(program: String, args: Vec<String>, mode: CaptureMode, title: Str
 /// interpreted as a command.
 fn create_path(path: &str, directory: bool, reveal: bool, editor: bool, contents: Option<&str>) {
     use std::path::Path;
+    if crate::security::path::validate_create_path(path).is_err() {
+        return;
+    }
     let p = Path::new(path);
     if directory {
         let _ = std::fs::create_dir_all(p);

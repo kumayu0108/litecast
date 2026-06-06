@@ -29,5 +29,11 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>litecast</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>litecast uses Automation to run commands in Terminal, Finder, and other apps when you trigger @-commands or notes features.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>litecast captures screenshots for AI vision queries and the screen color picker.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>litecast uses Accessibility to manage window positions and search menu-bar items when those features are enabled.</string>
 </dict>
 </plist>

@@ -305,9 +305,10 @@ Built-ins (no AI, no config required):
 | `@finder <path>` | Open a path/folder in Finder (empty = home) |
 | `@safari <url-or-query>` | Open a URL, or web-search the text, in your default browser |
 
-Define your own in `[[app_commands]]`. `{query}` (or `{arg}`) is replaced with
-the text typed after the keyword; a user entry reusing a built-in keyword
-overrides it.
+Define your own in `[[app_commands]]`. For `shell` and `open`, `{query}` (or
+`{arg}`) is replaced with the text typed after the keyword. For `applescript`,
+reference user input via `item 1 of argv` in the script body (not `{query}`).
+A user entry reusing a built-in keyword overrides it.
 
 ```toml
 [[app_commands]]
@@ -315,6 +316,12 @@ keyword = "ed"
 name = "Edit in editor"
 kind = "shell"          # "terminal" | "shell" | "applescript" | "open"
 template = "code {query}"
+
+# AppleScript example (user input via argv):
+# [[app_commands]]
+# keyword = "note"
+# kind = "applescript"
+# template = "on run argv\ntell application \"Notes\" to make new note with properties {body:(item 1 of argv)}\nend run"
 ```
 
 ## Quicklinks

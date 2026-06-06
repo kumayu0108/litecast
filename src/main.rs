@@ -20,6 +20,7 @@ mod preferences;
 mod providers;
 mod screenshot;
 mod secrets;
+mod security;
 mod target_pid;
 mod window;
 
@@ -3263,7 +3264,7 @@ fn main() {
 
     let (query_tx, query_rx) = mpsc::channel::<(u64, String, Filter)>();
     let pending: PendingResults = Arc::new(Mutex::new(None));
-    let history = History::new(50, config.clipboard.max_images);
+    let history = History::new(50, config.clipboard.max_images, config.clipboard.skip_secrets);
     let frecency = Frecency::load();
     let app_state = Arc::new(
         app_state::AppState::new(config.clone(), history.clone(), frecency.clone())

@@ -2,6 +2,7 @@ use crate::config::AppCommandConfig;
 use crate::engine::{keyword_matches, Provider};
 use crate::model::{osascript_action_with_args, Action, Item};
 use crate::providers::websearch::percent_encode;
+use crate::security::url::is_safe_open_url;
 
 /// `@keyword`-triggered app commands (e.g. `@term ls`, `@finder ~/Downloads`).
 /// These are namespaced under `@` (which is NOT a category-filter token, so the
@@ -100,25 +101,48 @@ impl AppCommandsProvider {
                     ("Open browser".to_string(), "https://".to_string())
                 } else if looks_like_url(arg) {
                     let url = normalize_url(arg);
-                    (format!("Open {url}"), url)
+                    if is_safe_open_url(&url) {
+                        (format!("Open {url}"), url)
+                    } else {
+                        (
+                            "Blocked unsafe URL".to_string(),
+                            "Only http:// and https:// URLs can be opened".to_string(),
+                        )
+                    }
                 } else {
                     let url = self.web_search_url.replace("{}", &percent_encode(arg));
                     (format!("Search the web for \"{arg}\""), url)
+                };
+                let action = if title == "Blocked unsafe URL" {
+                    Action::None
+                } else {
+                    Action::Open(target)
                 };
                 Item::new(
                     title,
                     "Opens in your default browser".to_string(),
                     "Command",
                     9_000,
-                    Action::Open(target),
+                    action,
                 )
             }
             other => {
                 let filled = fill_template(&cmd.template, arg);
                 let action = match other {
                     "open" => Action::Open(filled.clone()),
-                    // Run the user-authored AppleScript template without a shell.
-                    "applescript" => osascript_action_with_args(&filled, &[]),
+                    "applescript" => {
+                        if cmd.template.contains("{query}") || cmd.template.contains("{arg}") {
+                            eprintln!(
+                                "litecast: app command @{} uses {{query}}/{{arg}} in an AppleScript template; pass user input via `item 1 of argv` instead",
+                                cmd.keyword
+                            );
+                        }
+                        if arg.is_empty() {
+                            osascript_action_with_args(&cmd.template, &[])
+                        } else {
+                            osascript_action_with_args(&cmd.template, &[arg])
+                        }
+                    }
                     // "shell" and anything unrecognized run the user-authored
                     // template via the shell. This is an explicit power-user
                     // opt-in (`kind = "shell"`); the template comes from the
@@ -126,7 +150,11 @@ impl AppCommandsProvider {
                     _ => Action::RunShell(filled.clone()),
                 };
                 let subtitle = if cmd.subtitle.is_empty() {
-                    filled
+                    if other == "applescript" && !arg.is_empty() {
+                        format!("Runs AppleScript with argument: {arg}")
+                    } else {
+                        filled
+                    }
                 } else {
                     cmd.subtitle.clone()
                 };

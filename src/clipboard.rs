@@ -78,21 +78,27 @@ pub struct History {
     cap: usize,
     /// Max image entries kept (pinned images exempt).
     image_cap: usize,
+    /// When true, skip recording clipboard text that looks like a secret.
+    skip_secrets: bool,
 }
 
 impl History {
-    pub fn new(cap: usize, image_cap: usize) -> Self {
+    pub fn new(cap: usize, image_cap: usize, skip_secrets: bool) -> Self {
         let items = load(cap);
         Self {
             inner: Arc::new(Mutex::new(items)),
             cap,
             image_cap,
+            skip_secrets,
         }
     }
 
     /// Record a freshly copied text value. No-ops on empty/duplicate-of-most-recent.
     pub fn record(&self, text: String) {
         if text.is_empty() {
+            return;
+        }
+        if self.skip_secrets && looks_like_secret(&text) {
             return;
         }
         let mut guard = match self.inner.lock() {
@@ -242,4 +248,51 @@ fn load(cap: usize) -> VecDeque<ClipEntry> {
         }
     }
     items
+}
+
+fn looks_like_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let secret_markers = [
+        "api_key",
+        "api-key",
+        "apikey",
+        "secret",
+        "password",
+        "token",
+        "bearer ",
+    ];
+    if secret_markers.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    let trimmed = text.trim();
+    if trimmed.starts_with("sk-")
+        || trimmed.starts_with("ghp_")
+        || trimmed.starts_with("AKIA")
+    {
+        return true;
+    }
+    if trimmed.len() > 40 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_secret_detects_api_key_line() {
+        assert!(looks_like_secret("export API_KEY=abc123"));
+    }
+
+    #[test]
+    fn looks_like_secret_detects_sk_prefix() {
+        assert!(looks_like_secret("sk-abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn looks_like_secret_allows_normal_text() {
+        assert!(!looks_like_secret("hello world"));
+    }
 }

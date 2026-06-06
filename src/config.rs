@@ -31,9 +31,10 @@ web_search_url = "https://www.google.com/search?q={}"
 # `{arg}`) is replaced with the text typed after the keyword. A user entry that
 # reuses a built-in keyword overrides it.
 #
-# kind = "terminal"    -> run {query} in Terminal.app
+# kind = "terminal"    -> run the argument in Terminal.app (via argv)
 # kind = "shell"       -> run {query} via `sh -c`
-# kind = "applescript" -> run the template via `osascript -e`
+# kind = "applescript" -> run the template via `osascript`; reference user input
+#                        with `item 1 of argv`, not `{query}` in the script body
 # kind = "open"        -> open the template (file/url/app) via `open`
 #
 # [[app_commands]]
@@ -119,6 +120,8 @@ currency_ttl_hours = 12
 provider = "ollama"
 model = "llama3.2"
 endpoint = "http://127.0.0.1:11434"
+# Allow private/link-local endpoints for openai-compatible providers (default false).
+allow_private_endpoint = false
 
 # Quick notes. Type "note <text>" to append a timestamped line to a plain-text
 # notes file; type "note" (or "notes") to open it. By default the file lives at
@@ -143,9 +146,11 @@ critters = true
 # Clipboard history. Pin entries with "clip pin <number>" so they persist at the
 # top. Images copied to the clipboard are captured and stored under the support
 # directory; set keep_images = false to disable, or cap how many are kept.
+# skip_secrets = true skips likely API keys/passwords from being recorded.
 [clipboard]
 keep_images = true
 max_images = 20
+skip_secrets = true
 
 # Window management. This is the ONE litecast feature that needs the macOS
 # Accessibility permission, so it is OFF by default. Set enabled = true to show
@@ -523,6 +528,8 @@ pub struct ClipboardConfig {
     pub keep_images: bool,
     /// Max image entries kept in history (pinned images are exempt).
     pub max_images: usize,
+    /// Skip recording clipboard text that looks like a secret.
+    pub skip_secrets: bool,
 }
 
 impl Default for ClipboardConfig {
@@ -530,6 +537,7 @@ impl Default for ClipboardConfig {
         Self {
             keep_images: true,
             max_images: 20,
+            skip_secrets: true,
         }
     }
 }
@@ -611,10 +619,11 @@ pub struct AppCommandConfig {
     #[serde(default)]
     pub subtitle: String,
     /// How the template is run: "terminal" (run in Terminal.app), "shell"
-    /// (`sh -c`), "applescript" (`osascript -e`), or "open" (file/url/app).
+    /// (`sh -c`), "applescript" (`osascript` with argv), or "open" (file/url/app).
     pub kind: String,
-    /// Command/URL/script template; `{query}` (or `{arg}`) is replaced with the
-    /// text typed after the keyword.
+    /// Command/URL/script template. For `shell`/`open`, `{query}` (or `{arg}`)
+    /// is replaced with the text typed after the keyword. For `applescript`,
+    /// reference user input via `item 1 of argv` in the script body.
     #[serde(default)]
     pub template: String,
 }
@@ -652,6 +661,8 @@ pub struct AiConfig {
     pub provider: String,
     pub model: String,
     pub endpoint: String,
+    /// Allow private/link-local endpoints for openai-compatible providers.
+    pub allow_private_endpoint: bool,
 }
 
 impl Default for AiConfig {
@@ -660,7 +671,19 @@ impl Default for AiConfig {
             provider: "ollama".to_string(),
             model: "llama3.2".to_string(),
             endpoint: "http://127.0.0.1:11434".to_string(),
+            allow_private_endpoint: false,
         }
+    }
+}
+
+impl AiConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        crate::security::url::validate_ai_endpoint(
+            &self.provider,
+            &self.endpoint,
+            self.allow_private_endpoint,
+        )
+        .map(|_| ())
     }
 }
 
@@ -745,17 +768,20 @@ pub fn load() -> Config {
 /// Load config, returning a parse error string on failure.
 pub fn load_result() -> Result<Config, String> {
     let path = config_path();
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str(&contents).map_err(|e| format!("{e}")),
+    let config: Config = match std::fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str(&contents).map_err(|e| format!("{e}"))?,
         Err(_) => {
             let _ = std::fs::write(&path, DEFAULT_CONFIG_TOML);
-            Ok(Config::default())
+            return Ok(Config::default());
         }
-    }
+    };
+    config.ai.validate()?;
+    Ok(config)
 }
 
 /// Serialize and atomically write config to disk.
 pub fn save(config: &Config) -> Result<(), String> {
+    config.ai.validate()?;
     let path = config_path();
     let body = toml::to_string_pretty(config).map_err(|e| format!("{e}"))?;
     let tmp = path.with_extension("toml.tmp");

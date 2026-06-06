@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::config::{NewFileConfig, TemplateConfig};
 use crate::engine::{fuzzy_score, Provider};
 use crate::model::{Action, Item};
+use crate::security::path::safe_join;
 
 /// Quick file/folder creation under a configured base directory.
 pub struct NewFileProvider {
@@ -31,7 +32,7 @@ impl Provider for NewFileProvider {
         if lower.starts_with("new file ") {
             let name = q["new file ".len()..].trim();
             if !name.is_empty() {
-                push_create(out, &base.join(name), false, name);
+                push_create(out, &base, name, false);
             }
             return;
         }
@@ -42,7 +43,7 @@ impl Provider for NewFileProvider {
                 .map(str::trim)
                 .unwrap_or("");
             if !name.is_empty() {
-                push_create(out, &base.join(name), true, name);
+                push_create(out, &base, name, true);
             }
             return;
         }
@@ -79,11 +80,24 @@ impl Provider for NewFileProvider {
     }
 }
 
-fn push_create(out: &mut Vec<Item>, path: &PathBuf, directory: bool, label: &str) {
+fn push_create(out: &mut Vec<Item>, base: &PathBuf, name: &str, directory: bool) {
+    let path = match safe_join(base, name) {
+        Ok(path) => path,
+        Err(reason) => {
+            out.push(Item::new(
+                format!("Cannot create: {name}"),
+                reason,
+                "File",
+                8_500,
+                Action::None,
+            ));
+            return;
+        }
+    };
     let p = path.to_string_lossy().to_string();
     let kind = if directory { "folder" } else { "file" };
     out.push(Item::new(
-        format!("Create {kind}: {label}"),
+        format!("Create {kind}: {name}"),
         format!("{} - Enter to create and reveal", p),
         "File",
         8_500,
@@ -98,7 +112,19 @@ fn push_create(out: &mut Vec<Item>, path: &PathBuf, directory: bool, label: &str
 }
 
 fn push_template(out: &mut Vec<Item>, base: &PathBuf, t: &TemplateConfig) {
-    let path = base.join(&t.name);
+    let path = match safe_join(base, &t.name) {
+        Ok(path) => path,
+        Err(reason) => {
+            out.push(Item::new(
+                format!("Cannot create template: {}", t.name),
+                reason,
+                "File",
+                8_400,
+                Action::None,
+            ));
+            return;
+        }
+    };
     let p = path.to_string_lossy().to_string();
     let contents = t.contents.clone();
     out.push(Item::new(

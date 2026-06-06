@@ -31,8 +31,10 @@ pub struct TabControls {
     pub ai_provider: Retained<NSPopUpButton>,
     pub ai_model: Retained<NSTextField>,
     pub ai_endpoint: Retained<NSTextField>,
+    pub ai_allow_private: Retained<NSButton>,
     pub clipboard_keep: Retained<NSButton>,
     pub clipboard_max: Retained<NSTextField>,
+    pub clipboard_skip_secrets: Retained<NSButton>,
     pub conversion_ttl: Retained<NSTextField>,
     pub window_enabled: Retained<NSButton>,
     pub menu_enabled: Retained<NSButton>,
@@ -90,8 +92,24 @@ pub fn build_controls(mtm: MainThreadMarker, config: &Config) -> TabControls {
         ),
         ai_model: field(mtm, &config.ai.model, 0.0, 0.0, 300.0),
         ai_endpoint: field(mtm, &config.ai.endpoint, 0.0, 0.0, 400.0),
+        ai_allow_private: checkbox(
+            mtm,
+            "Allow private AI endpoints",
+            config.ai.allow_private_endpoint,
+            0.0,
+            0.0,
+            300.0,
+        ),
         clipboard_keep: checkbox(mtm, "Keep clipboard images", config.clipboard.keep_images, 0.0, 0.0, 300.0),
         clipboard_max: field(mtm, &config.clipboard.max_images.to_string(), 0.0, 0.0, 80.0),
+        clipboard_skip_secrets: checkbox(
+            mtm,
+            "Skip likely secrets in clipboard history",
+            config.clipboard.skip_secrets,
+            0.0,
+            0.0,
+            360.0,
+        ),
         conversion_ttl: field(
             mtm,
             &config.conversion.currency_ttl_hours.to_string(),
@@ -249,6 +267,7 @@ pub fn collect_config(controls: &TabControls) -> Config {
             provider: popup_selection(&controls.ai_provider),
             model: str_field(&controls.ai_model),
             endpoint: str_field(&controls.ai_endpoint),
+            allow_private_endpoint: bool_field(&controls.ai_allow_private),
         },
         ui: UiConfig {
             playful_placeholders: bool_field(&controls.ui_playful),
@@ -257,6 +276,7 @@ pub fn collect_config(controls: &TabControls) -> Config {
         clipboard: ClipboardConfig {
             keep_images: bool_field(&controls.clipboard_keep),
             max_images: str_field(&controls.clipboard_max).parse().unwrap_or(20),
+            skip_secrets: bool_field(&controls.clipboard_skip_secrets),
         },
         window: WindowConfig {
             enabled: bool_field(&controls.window_enabled),
@@ -376,7 +396,7 @@ pub fn build_tab_views(
                 list_tab(
                     mtm,
                     w,
-                    "@keyword actions that take a free-text argument. kind = terminal / shell / applescript / open. {query} in the template is replaced by what you type after the keyword.",
+                    "@keyword actions that take a free-text argument. kind = terminal / shell / applescript / open. For shell/open, {query} in the template is replaced by what you type after the keyword. For applescript, reference user input with item 1 of argv in the script body.",
                     vec![
                         ColSpec::text("keyword", 0.8),
                         ColSpec::text("name", 1.0),
@@ -673,7 +693,11 @@ fn ai_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSView> {
         "Endpoint",
         &c.ai_endpoint,
         0.0,
-        "Override base URL. Leave empty for hosted providers; for Ollama use http://127.0.0.1:11434.",
+        "Override base URL. Leave empty for hosted providers; for Ollama use http://127.0.0.1:11434. Endpoints are validated to block SSRF.",
+    );
+    f.checkbox_row(
+        &c.ai_allow_private,
+        "Allow private/link-local endpoints for openai-compatible providers (advanced).",
     );
     f.add_caption(
         "API keys are stored in the macOS Keychain, never in config.toml. Set one with \"setkey <key>\" (or \"setup\") in the launcher.",
@@ -694,6 +718,10 @@ fn clipboard_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSV
         &c.clipboard_max,
         80.0,
         "How many captured images to keep before old ones are dropped (pinned images are exempt).",
+    );
+    f.checkbox_row(
+        &c.clipboard_skip_secrets,
+        "Skip recording clipboard text that looks like an API key, password, or token.",
     );
     f.finish()
 }

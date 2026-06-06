@@ -3,6 +3,7 @@ use crate::config::AiConfig;
 use crate::engine::Provider;
 use crate::model::{Action, Item};
 use crate::secrets;
+use crate::security::redact::mask_secret;
 
 /// Surfaces AI actions. Typing `? <question>` offers to ask the configured
 /// backend (the request only fires when you press Enter, never per-keystroke).
@@ -37,7 +38,11 @@ impl Provider for AiProvider {
                 self.push_setup_guide(out);
             } else {
                 out.push(Item::new(
-                    format!("Save {} API key", friendly_name(provider)),
+                    format!(
+                        "Save {} API key ({})",
+                        friendly_name(provider),
+                        mask_secret(key)
+                    ),
                     format!("Press Enter to store it securely in the Keychain (service \"litecast\", provider \"{provider}\")"),
                     "AI",
                     11_000,
