@@ -8,11 +8,11 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DeclaredClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSScrollView, NSTextField, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -53,6 +53,15 @@ define_class!(
     struct PrefsController;
 
     unsafe impl NSObjectProtocol for PrefsController {}
+
+    unsafe impl NSWindowDelegate for PrefsController {
+        /// Red close button hides Settings instead of quitting litecast.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            self.ivars().window.orderOut(None);
+            false
+        }
+    }
 
     impl PrefsController {
         #[unsafe(method(prefsSave:))]
@@ -185,7 +194,7 @@ impl PrefsController {
 
     fn rebuild_ui(&self, cfg: Config) {
         *self.ivars().snapshot.borrow_mut() = cfg;
-        self.ivars().window.close();
+        self.ivars().window.orderOut(None);
         PREFS.with(|p| *p.borrow_mut() = None);
     }
 
@@ -266,6 +275,9 @@ pub fn show(
     if let Some(ctrl) = PREFS.with(|p| p.borrow().clone()) {
         // DEBUG-TEMP
         crate::debug_log::log("preferences::show", "raising existing window", "{}");
+        ctrl.ivars()
+            .window
+            .setDelegate(Some(ProtocolObject::from_ref(&*ctrl)));
         objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         ctrl.ivars().window.makeKeyAndOrderFront(None);
         ctrl.ivars().window.center();
@@ -445,6 +457,7 @@ pub fn show(
     // Show the first section.
     ctrl.show_section(0);
 
+    window.setDelegate(Some(ProtocolObject::from_ref(&*ctrl)));
     PREFS.with(|p| *p.borrow_mut() = Some(ctrl.clone()));
     // DEBUG-TEMP: ensure the app is frontmost so the new window is not created
     // behind the (borderless, floating) launcher panel or other apps.

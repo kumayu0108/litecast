@@ -22,9 +22,9 @@
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <!-- Regular app: Dock icon + menu bar extra for Settings. -->
+    <!-- Agent app: menu bar only, no Dock icon. -->
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>

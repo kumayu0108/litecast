@@ -82,6 +82,7 @@ features = [
     "NSMenu",
     "NSMenuItem",
     "NSStatusBar",
+    "NSStatusBarButton",
     "NSStatusItem",
     "NSButton",
     "NSAttributedString",

@@ -400,7 +400,7 @@ define_class!(
             );
             let mtm = MainThreadMarker::new().expect("main thread");
             app_shell::install(mtm, self as &AnyObject);
-            // DEBUG-TEMP: Regular activation policy needs a live app event target.
+            // DEBUG-TEMP: Accessory activation policy still needs a live app event target.
             self.ensure_hotkeys_registered("applicationDidFinishLaunching");
             // A GUI launch of the .app bundle (Finder/Apps/Dock) should open the
             // Settings window, matching the user's expectation that launching the
@@ -422,6 +422,13 @@ define_class!(
                 );
             }
             debug_log::log("applicationDidFinishLaunching", "EXIT", "{}");
+        }
+
+        /// Closing the Settings window (or hiding the launcher panel) must not
+        /// quit the app — litecast keeps running in the menu bar until Quit.
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            false
         }
 
         /// Dock icon click (or Finder "Reopen") while the app is already running.
@@ -494,7 +501,7 @@ define_class!(
 
         #[unsafe(method(windowDidChangeScreen:))]
         fn window_did_change_screen(&self, _notification: &NSNotification) {
-            self.layout(self.ivars().results.borrow().len(), false);
+            self.layout(self.ivars().results.borrow().len(), false, true);
         }
     }
 
@@ -982,7 +989,7 @@ impl AppDelegate {
         let ivars = self.ivars();
         ivars.active_filter.set(filter);
         self.sync_panel_expansion(false);
-        self.layout(ivars.results.borrow().len(), false);
+        self.layout(ivars.results.borrow().len(), false, false);
         self.dispatch_query();
     }
 
@@ -1027,7 +1034,7 @@ impl AppDelegate {
             *ivars.results.borrow_mut() = Vec::new();
             ivars.table.reloadData();
         }
-        self.layout(ivars.results.borrow().len(), animated);
+        self.layout(ivars.results.borrow().len(), animated, false);
         // Expanding grows the panel and moves the search pill into the top band.
         // The search field + icon are DIRECT subviews of the root content view
         // and are reframed by manual `setFrame` every layout pass (same single
@@ -1102,7 +1109,7 @@ impl AppDelegate {
             *ivars.results.borrow_mut() = Vec::new();
             ivars.table.reloadData();
         }
-        self.layout(ivars.results.borrow().len(), false);
+        self.layout(ivars.results.borrow().len(), false, true);
 
         // Rotate a playful placeholder (unless in screenshot mode).
         if ivars
@@ -1153,6 +1160,9 @@ impl AppDelegate {
         // when our app isn't the active one yet (e.g. invoked over Mission
         // Control or another app's fullscreen space).
         ivars.panel.orderFrontRegardless();
+        // Re-layout after ordering front so AppKit picks the target display
+        // (setFrame alone before show can stick to the screen from first open).
+        self.layout(ivars.results.borrow().len(), false, true);
         // Force the borderless panel to become key NOW (makeKeyAndOrderFront
         // does not always make a NonactivatingPanel key on its own).
         unsafe {
@@ -1270,7 +1280,7 @@ impl AppDelegate {
         for chip in &ivars.chips {
             chip.setHidden(true);
         }
-        self.layout(0, false);
+        self.layout(0, false, false);
     }
 
     fn dispatch_query(&self) {
@@ -1304,7 +1314,7 @@ impl AppDelegate {
             Some((filter, rest)) => {
                 if ivars.active_filter.get() != filter {
                     ivars.active_filter.set(filter);
-                    self.layout(ivars.results.borrow().len(), false);
+                    self.layout(ivars.results.borrow().len(), false, false);
                 }
                 rest
             }
@@ -1348,7 +1358,7 @@ impl AppDelegate {
             };
             *ivars.results.borrow_mut() = vec![item];
             ivars.table.reloadData();
-            self.layout(1, false);
+            self.layout(1, false, false);
             self.select_row(0);
             return;
         }
@@ -1379,7 +1389,7 @@ impl AppDelegate {
             let n = items.len();
             *ivars.results.borrow_mut() = items;
             ivars.table.reloadData();
-            self.layout(n, false);
+            self.layout(n, false, false);
             if n > 0 {
                 self.select_row(0);
             }
@@ -1472,7 +1482,7 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n, false);
+        self.layout(n, false, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1544,7 +1554,7 @@ impl AppDelegate {
         let n = items.len();
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
-        self.layout(n, false);
+        self.layout(n, false, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1596,7 +1606,7 @@ impl AppDelegate {
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
         self.ensure_panel_expanded();
-        self.layout(n, false);
+        self.layout(n, false, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -1768,7 +1778,7 @@ impl AppDelegate {
         )];
         ivars.table.reloadData();
         self.ensure_panel_expanded();
-        self.layout(1, false);
+        self.layout(1, false, false);
         self.select_row(0);
     }
 
@@ -1810,7 +1820,7 @@ impl AppDelegate {
         )];
         ivars.table.reloadData();
         self.ensure_panel_expanded();
-        self.layout(1, false);
+        self.layout(1, false, false);
 
         let config = ivars
             .app_state
@@ -1879,7 +1889,7 @@ impl AppDelegate {
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
         self.ensure_panel_expanded();
-        self.layout(n, false);
+        self.layout(n, false, false);
         self.select_row(0);
     }
 
@@ -1925,7 +1935,7 @@ impl AppDelegate {
         *ivars.results.borrow_mut() = items;
         ivars.table.reloadData();
         self.ensure_panel_expanded();
-        self.layout(n, false);
+        self.layout(n, false, false);
         if n > 0 {
             self.select_row(0);
         }
@@ -2004,7 +2014,9 @@ impl AppDelegate {
     }
 
     /// Resize the panel to fit `rows` results and reposition the subviews.
-    fn layout(&self, _rows: usize, animated: bool) {
+    /// When `reposition` is true (hotkey open), place the panel on the active
+    /// display; otherwise keep the current horizontal position and top edge.
+    fn layout(&self, _rows: usize, animated: bool, reposition: bool) {
         let ivars = self.ivars();
         let expanded = ivars.panel_expanded.get();
         // Sum the actual per-row heights (AI answer blocks are taller than a
@@ -2037,14 +2049,22 @@ impl AppDelegate {
         let band_bottom = results_block;
 
         let mtm = self.mtm();
-        let (x, top) = if let Some(screen) = screen_for_panel(mtm, ivars.prev_app_pid.get()) {
-            let vf = screen.visibleFrame();
-            (
-                vf.origin.x + (vf.size.width - PANEL_WIDTH) / 2.0,
-                vf.origin.y + vf.size.height * TOP_FRACTION,
-            )
+        let (x, top) = if reposition {
+            if let Some(screen) = screen_for_panel(mtm, ivars.prev_app_pid.get()) {
+                let vf = screen.visibleFrame();
+                (
+                    vf.origin.x + (vf.size.width - PANEL_WIDTH) / 2.0,
+                    vf.origin.y + vf.size.height * TOP_FRACTION,
+                )
+            } else {
+                (200.0, 600.0)
+            }
         } else {
-            (200.0, 600.0)
+            let current = ivars.panel.frame();
+            (
+                current.origin.x,
+                current.origin.y + current.size.height,
+            )
         };
         let origin_y = top - total_h;
 
@@ -2600,10 +2620,15 @@ fn accent_chip_idle_fill() -> Retained<NSColor> {
     NSColor::labelColor().colorWithAlphaComponent(0.07)
 }
 
-/// Screen for panel placement: cursor screen, then prev-app screen, then main.
+/// Screen for panel placement: cursor screen, key-window screen, prev-app
+/// window, then any screen. Called before litecast activates so mainScreen
+/// still reflects the frontmost app's display.
 fn screen_for_panel(mtm: MainThreadMarker, prev_pid: i32) -> Option<Retained<NSScreen>> {
     let point = NSEvent::mouseLocation();
     if let Some(s) = screen_containing_point(mtm, point) {
+        return Some(s);
+    }
+    if let Some(s) = NSScreen::mainScreen(mtm) {
         return Some(s);
     }
     if prev_pid > 0 {
@@ -2613,7 +2638,11 @@ fn screen_for_panel(mtm: MainThreadMarker, prev_pid: i32) -> Option<Retained<NSS
             }
         }
     }
-    NSScreen::mainScreen(mtm)
+    let screens = NSScreen::screens(mtm);
+    if screens.count() > 0 {
+        return Some(screens.objectAtIndex(0));
+    }
+    None
 }
 
 fn screen_containing_point(mtm: MainThreadMarker, point: NSPoint) -> Option<Retained<NSScreen>> {
@@ -2945,8 +2974,7 @@ fn build_panel(mtm: MainThreadMarker) -> PanelViews {
     panel.setBecomesKeyOnlyIfNeeded(false);
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary,
+            | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
 
     // Root clips the square window frame to rounded corners; the vibrancy view
@@ -3199,9 +3227,9 @@ fn main() {
     let open_prefs = std::env::args().any(|a| a == "--preferences" || a == "-preferences");
     let mtm = MainThreadMarker::new().expect("main() must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     // DEBUG-TEMP
-    debug_log::log("main", "activation_policy", r#"{"policy":"Regular"}"#);
+    debug_log::log("main", "activation_policy", r#"{"policy":"Accessory"}"#);
 
     let views = build_panel(mtm);
     let PanelViews {
@@ -3562,6 +3590,9 @@ fn main() {
             running
         }),
     );
+    // Install menus synchronously so the status-item icon is present before the
+    // run loop starts (applicationDidFinishLaunching may be deferred).
+    app_shell::install(mtm, &*delegate as &AnyObject);
     (&*delegate).ensure_hotkeys_registered("main:post_finishLaunching");
     // DEBUG-TEMP
     debug_log::log("main", "entering run loop", r#"{"note":"app.run() about to block"}"#);

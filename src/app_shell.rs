@@ -1,25 +1,35 @@
-//! Dock-visible app shell: application menu and menu-bar status item.
+//! Menu-bar agent app shell: application menu and status item (no Dock icon).
+
+use std::sync::Once;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
+use objc2::AnyThread;
 use objc2_app_kit::{
-    NSApplication, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+    NSSquareStatusItemLength, NSVariableStatusItemLength,
 };
-use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_foundation::{MainThreadMarker, NSBundle, NSSize, NSString};
 
 use crate::debug_log;
 
+static INSTALLED: Once = Once::new();
+
 /// Install the main menu bar (litecast → About, Settings, Quit) and a status-item menu.
+/// Idempotent: safe to call from `main` after `finishLaunching` and from
+/// `applicationDidFinishLaunching`.
 pub fn install(mtm: MainThreadMarker, target: &AnyObject) {
-    // DEBUG-TEMP
-    debug_log::log("app_shell::install", "begin app menu", "{}");
-    install_app_menu(mtm, target);
-    // DEBUG-TEMP
-    debug_log::log("app_shell::install", "begin status item", "{}");
-    install_status_item(mtm, target);
-    // DEBUG-TEMP
-    debug_log::log("app_shell::install", "done", "{}");
+    INSTALLED.call_once(|| {
+        // DEBUG-TEMP
+        debug_log::log("app_shell::install", "begin app menu", "{}");
+        install_app_menu(mtm, target);
+        // DEBUG-TEMP
+        debug_log::log("app_shell::install", "begin status item", "{}");
+        install_status_item(mtm, target);
+        // DEBUG-TEMP
+        debug_log::log("app_shell::install", "done", "{}");
+    });
 }
 
 fn install_app_menu(mtm: MainThreadMarker, target: &AnyObject) {
@@ -118,21 +128,61 @@ fn edit_menu_item_shift(
     item
 }
 
+/// Menu-bar icon from the app bundle. The bundled `.icns` is full-color and
+/// 1024×1024; without an explicit small size it renders as a blank status item.
+fn status_item_icon() -> Option<Retained<NSImage>> {
+    let bundle = NSBundle::mainBundle();
+    let path = bundle.pathForResource_ofType(
+        Some(&NSString::from_str("litecast")),
+        Some(&NSString::from_str("icns")),
+    )?;
+    debug_log::log(
+        "status_item_icon",
+        "bundle resource",
+        &format!(r#"{{"path":{:?}}}"#, path.to_string()),
+    );
+    let img = NSImage::initWithContentsOfFile(NSImage::alloc(), &path)?;
+    // Standard menu-bar extra size (18pt; AppKit picks @2x from the icns).
+    img.setSize(NSSize::new(18.0, 18.0));
+    Some(img)
+}
+
 fn install_status_item(mtm: MainThreadMarker, target: &AnyObject) {
     debug_log::log("install_status_item", "systemStatusBar", "{}"); // DEBUG-TEMP
     let status_bar = NSStatusBar::systemStatusBar();
+    let icon = status_item_icon();
+    let length = if icon.is_some() {
+        NSSquareStatusItemLength
+    } else {
+        NSVariableStatusItemLength
+    };
     debug_log::log("install_status_item", "statusItemWithLength", "{}"); // DEBUG-TEMP
-    let item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
-    debug_log::log("install_status_item", "button", "{}"); // DEBUG-TEMP
+    let item = status_bar.statusItemWithLength(length);
+    // Always show; do not use autosaveName — it can restore a user-hidden state.
+    item.setVisible(true);
+    debug_log::log(
+        "install_status_item",
+        "created",
+        &format!(
+            r#"{{"has_icon":{},"visible":{}}}"#,
+            icon.is_some(),
+            item.isVisible()
+        ),
+    );
     if let Some(button) = item.button(mtm) {
-        button.setTitle(&NSString::from_str("⌘"));
+        if let Some(ref icon) = icon {
+            button.setImage(Some(icon));
+            button.setTitle(&NSString::from_str(""));
+        } else {
+            button.setTitle(&NSString::from_str("⌘"));
+        }
         button.setToolTip(Some(&NSString::from_str("litecast")));
     }
 
     let menu = NSMenu::new(mtm);
     menu.addItem(&menu_item(
         mtm,
-        "Open litecast",
+        "Show Launcher",
         Some(sel!(toggleFromHotkey)),
         target,
     ));
@@ -143,10 +193,16 @@ fn install_status_item(mtm: MainThreadMarker, target: &AnyObject) {
         target,
     ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Quit", Some(sel!(quitApp:)), target));
+    menu.addItem(&menu_item(
+        mtm,
+        "Quit litecast",
+        Some(sel!(quitApp:)),
+        target,
+    ));
     item.setMenu(Some(&menu));
-    // Keep alive for process lifetime (leak is intentional; matches menu bar pattern).
-    let _keep: Retained<NSStatusItem> = item;
+    // Retain for process lifetime — dropping this `Retained` at return would
+    // release our reference while the status bar still shows the item.
+    std::mem::forget(item);
 }
 
 fn menu_item(
