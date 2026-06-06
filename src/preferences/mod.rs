@@ -271,22 +271,13 @@ pub fn show(
     app_state: Arc<AppState>,
     delegate_ptr: usize,
 ) {
-    crate::debug_log::log("preferences::show", "called", "{}"); // DEBUG-TEMP
     if let Some(ctrl) = PREFS.with(|p| p.borrow().clone()) {
-        // DEBUG-TEMP
-        crate::debug_log::log("preferences::show", "raising existing window", "{}");
         ctrl.ivars()
             .window
             .setDelegate(Some(ProtocolObject::from_ref(&*ctrl)));
-        objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        objc2_app_kit::NSApplication::sharedApplication(mtm).activate();
         ctrl.ivars().window.makeKeyAndOrderFront(None);
         ctrl.ivars().window.center();
-        // DEBUG-TEMP
-        crate::debug_log::log(
-            "preferences::show",
-            "existing window isVisible",
-            &format!("{{\"visible\":{}}}", ctrl.ivars().window.isVisible()),
-        );
         return;
     }
 
@@ -353,7 +344,6 @@ pub fn show(
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
         | NSWindowStyleMask::Resizable;
-    crate::debug_log::log("preferences::show", "alloc window", "{}"); // DEBUG-TEMP
     let window: Retained<NSWindow> = unsafe {
         msg_send![
             NSWindow::alloc(mtm),
@@ -459,23 +449,11 @@ pub fn show(
 
     window.setDelegate(Some(ProtocolObject::from_ref(&*ctrl)));
     PREFS.with(|p| *p.borrow_mut() = Some(ctrl.clone()));
-    // DEBUG-TEMP: ensure the app is frontmost so the new window is not created
     // behind the (borderless, floating) launcher panel or other apps.
-    objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    objc2_app_kit::NSApplication::sharedApplication(mtm).activate();
     window.center();
-    crate::debug_log::log("preferences::show", "makeKeyAndOrderFront", "{}"); // DEBUG-TEMP
     window.makeKeyAndOrderFront(None);
     window.orderFrontRegardless();
-    // DEBUG-TEMP
-    crate::debug_log::log(
-        "preferences::show",
-        "new window shown",
-        &format!(
-            "{{\"visible\":{},\"level\":{}}}",
-            window.isVisible(),
-            window.level()
-        ),
-    );
 }
 
 fn make_footer_btn(

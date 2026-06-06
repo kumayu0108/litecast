@@ -6,11 +6,15 @@ use crate::model::{Action, Item};
 /// match, or directly via an optional keyword (with `{}` argument substitution).
 pub struct CommandsProvider {
     commands: Vec<CommandConfig>,
+    confirm_config_shell: bool,
 }
 
 impl CommandsProvider {
-    pub fn new(commands: Vec<CommandConfig>) -> Self {
-        Self { commands }
+    pub fn new(commands: Vec<CommandConfig>, confirm_config_shell: bool) -> Self {
+        Self {
+            commands,
+            confirm_config_shell,
+        }
     }
 }
 
@@ -25,7 +29,7 @@ impl Provider for CommandsProvider {
             // Keyword trigger takes priority and supports an argument.
             if !cmd.keyword.is_empty() {
                 if let Some(arg) = match_keyword(q, &cmd.keyword) {
-                    out.push(build_item(cmd, arg, 8_500));
+                    out.push(build_item(cmd, arg, 8_500, self.confirm_config_shell));
                     continue;
                 }
             }
@@ -38,7 +42,7 @@ impl Provider for CommandsProvider {
                 }
             }
             if let Some(score) = best {
-                out.push(build_item(cmd, "", 200 + score as i64));
+                out.push(build_item(cmd, "", 200 + score as i64, self.confirm_config_shell));
             }
         }
     }
@@ -55,14 +59,15 @@ fn match_keyword<'a>(q: &'a str, keyword: &str) -> Option<&'a str> {
     keyword_matches(first, keyword).then_some(rest)
 }
 
-fn build_item(cmd: &CommandConfig, arg: &str, score: i64) -> Item {
+fn build_item(cmd: &CommandConfig, arg: &str, score: i64, confirm_config_shell: bool) -> Item {
     let target = if cmd.target.contains("{}") {
         cmd.target.replace("{}", arg)
     } else {
         cmd.target.clone()
     };
     let action = match cmd.kind.as_str() {
-        "shell" => Action::RunShell(target.clone()),
+        "shell" => Action::RunShell(target.clone())
+            .wrap_shell_confirm(format!("Run command: {}", cmd.name), confirm_config_shell),
         _ => Action::Open(target.clone()),
     };
     let subtitle = if cmd.subtitle.is_empty() {

@@ -37,7 +37,10 @@ pub fn build_engine(history: History, config: &Config, frecency: Frecency) -> En
     engine.add(Box::new(EmojiProvider), Filter::Emoji);
     engine.add(Box::new(ClipboardProvider::new(history)), Filter::Clip);
     engine.add(
-        Box::new(CommandsProvider::new(config.commands.clone())),
+        Box::new(CommandsProvider::new(
+            config.commands.clone(),
+            config.security.confirm_config_shell,
+        )),
         Filter::Cmd,
     );
     let app_commands = config::merged_app_commands(&config.app_commands);

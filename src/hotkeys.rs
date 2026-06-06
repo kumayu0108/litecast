@@ -8,7 +8,6 @@ use global_hotkey::{
 };
 
 use crate::config::{CommandConfig, Config, HotkeyConfig};
-use crate::debug_log;
 use crate::model::Action;
 
 /// Live hotkey ids used by the background listener thread.
@@ -124,20 +123,28 @@ fn parse_key_code(token: &str) -> Option<Code> {
     })
 }
 
-pub fn resolve_hotkey_action(hk: &HotkeyConfig, commands: &[CommandConfig]) -> Option<Action> {
-    match hk.kind.as_str() {
-        "open" => Some(Action::Open(hk.target.clone())),
-        "shell" => Some(Action::RunShell(hk.target.clone())),
+pub fn resolve_hotkey_action(
+    hk: &HotkeyConfig,
+    commands: &[CommandConfig],
+    confirm_config_shell: bool,
+) -> Option<Action> {
+    let action = match hk.kind.as_str() {
+        "open" => Action::Open(hk.target.clone()),
+        "shell" => Action::RunShell(hk.target.clone()),
         "command" => {
             let cmd = commands.iter().find(|c| c.name == hk.target)?;
             let target = cmd.target.replace("{}", "");
-            Some(match cmd.kind.as_str() {
+            match cmd.kind.as_str() {
                 "shell" => Action::RunShell(target),
                 _ => Action::Open(target),
-            })
+            }
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some(action.wrap_shell_confirm(
+        format!("Run hotkey {}: {}", hk.key, hk.target),
+        confirm_config_shell,
+    ))
 }
 
 /// Register toggle, screenshot, and custom hotkeys. Returns the manager and id map.
@@ -175,25 +182,13 @@ pub fn register_all(
         .map_err(|e| format!("screenshot hotkey: {e}"))?;
     ids.toggle = toggle_hotkey.id();
     ids.screenshot = shot_hotkey.id();
-    // DEBUG-TEMP
-    debug_log::log(
-        "hotkeys::register_all",
-        "built-in registered",
-        &format!(
-            r#"{{"toggle_combo":"{}","toggle_id":{},"screenshot_combo":"{}","screenshot_id":{}}}"#,
-            config.hotkey.toggle,
-            ids.toggle,
-            config.hotkey.screenshot,
-            ids.screenshot,
-        ),
-    );
 
     for hk in &config.hotkeys {
         let Some(parsed) = parse_hotkey_combo(&hk.key) else {
             eprintln!("[litecast] skipping hotkey with invalid combo: {:?}", hk.key);
             continue;
         };
-        let Some(action) = resolve_hotkey_action(hk, &config.commands) else {
+        let Some(action) = resolve_hotkey_action(hk, &config.commands, config.security.confirm_config_shell) else {
             eprintln!(
                 "[litecast] skipping hotkey {:?}: unknown kind/target ({}: {})",
                 hk.key, hk.kind, hk.target

@@ -12,7 +12,7 @@ use super::list_editor::{build_list_editor, ColSpec, ListEditor};
 use crate::config::{
     AiConfig, AppCommandConfig, ClipboardConfig, ColorConfig, CommandConfig, Config,
     ConversionConfig, DateTimeConfig, GitConfig, HotkeyConfig, MenuConfig, NewFileConfig,
-    NotesConfig, PomodoroConfig, QuicklinkConfig, ScriptsConfig, SnippetConfig, SnippetsConfig,
+    NotesConfig, PomodoroConfig, QuicklinkConfig, ScriptsConfig, SecurityConfig, SnippetConfig, SnippetsConfig,
     TimezoneConfig, ToggleHotkeyConfig, UiConfig, WindowConfig,
 };
 use crate::preferences::helpers::{
@@ -26,6 +26,7 @@ pub struct TabControls {
     pub launch_login: Retained<NSButton>,
     pub ui_playful: Retained<NSButton>,
     pub ui_critters: Retained<NSButton>,
+    pub security_confirm_shell: Retained<NSButton>,
     pub hotkey_toggle: Retained<HotkeyRecorder>,
     pub hotkey_screenshot: Retained<HotkeyRecorder>,
     pub ai_provider: Retained<NSPopUpButton>,
@@ -80,6 +81,14 @@ pub fn build_controls(mtm: MainThreadMarker, config: &Config) -> TabControls {
         ),
         ui_playful: checkbox(mtm, "Playful placeholders", config.ui.playful_placeholders, 0.0, 0.0, 300.0),
         ui_critters: checkbox(mtm, "Wandering critters", config.ui.critters, 0.0, 0.0, 300.0),
+        security_confirm_shell: checkbox(
+            mtm,
+            "Confirm config shell commands",
+            config.security.confirm_config_shell,
+            0.0,
+            0.0,
+            360.0,
+        ),
         hotkey_toggle: hotkey_recorder(mtm, &config.hotkey.toggle, 0.0, 0.0, 260.0),
         hotkey_screenshot: hotkey_recorder(mtm, &config.hotkey.screenshot, 0.0, 0.0, 260.0),
         ai_provider: popup(
@@ -334,6 +343,9 @@ pub fn collect_config(controls: &TabControls) -> Config {
         },
         menu: MenuConfig {
             enabled: bool_field(&controls.menu_enabled),
+        },
+        security: SecurityConfig {
+            confirm_config_shell: bool_field(&controls.security_confirm_shell),
         },
     }
 }
@@ -621,6 +633,10 @@ fn general_tab(mtm: MainThreadMarker, c: &TabControls, w: f64) -> Retained<NSVie
     f.checkbox_row(
         &c.ui_critters,
         "Occasionally let small animated critters wander across the panel. Purely cosmetic.",
+    );
+    f.checkbox_row(
+        &c.security_confirm_shell,
+        "Require confirmation before running shell commands from config [[commands]] or hotkeys.",
     );
     f.finish()
 }

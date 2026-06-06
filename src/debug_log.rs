@@ -1,5 +1,4 @@
 //! Temporary debug logging for hotkey / layout / panel diagnostics.
-//! Marked DEBUG-TEMP — remove before pushing.
 //!
 //! All logging here is compiled out entirely in release builds: every public
 //! function below is a no-op when `debug_assertions` is disabled (i.e. in

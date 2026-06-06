@@ -108,7 +108,10 @@ fn build(proc: &Proc, score: i64) -> Item {
         Action::Confirm {
             label: format!("kill {} (pid {})", proc.name, proc.pid),
             // SIGTERM (graceful): plain `kill`, not `kill -9`.
-            inner: Box::new(Action::RunShell(format!("kill {}", proc.pid))),
+            inner: Box::new(Action::Run {
+                program: "/bin/kill".to_string(),
+                args: vec![proc.pid.to_string()],
+            }),
         },
     )
 }

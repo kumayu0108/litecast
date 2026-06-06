@@ -12,8 +12,6 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSBundle, NSSize, NSString};
 
-use crate::debug_log;
-
 static INSTALLED: Once = Once::new();
 
 /// Install the main menu bar (litecast → About, Settings, Quit) and a status-item menu.
@@ -21,34 +19,22 @@ static INSTALLED: Once = Once::new();
 /// `applicationDidFinishLaunching`.
 pub fn install(mtm: MainThreadMarker, target: &AnyObject) {
     INSTALLED.call_once(|| {
-        // DEBUG-TEMP
-        debug_log::log("app_shell::install", "begin app menu", "{}");
         install_app_menu(mtm, target);
-        // DEBUG-TEMP
-        debug_log::log("app_shell::install", "begin status item", "{}");
         install_status_item(mtm, target);
-        // DEBUG-TEMP
-        debug_log::log("app_shell::install", "done", "{}");
     });
 }
 
 fn install_app_menu(mtm: MainThreadMarker, target: &AnyObject) {
-    debug_log::log("install_app_menu", "sharedApplication", "{}"); // DEBUG-TEMP
     let app = NSApplication::sharedApplication(mtm);
-    debug_log::log("install_app_menu", "NSMenu::new bar", "{}"); // DEBUG-TEMP
     let bar = NSMenu::new(mtm);
-    debug_log::log("install_app_menu", "NSMenu::new app_menu", "{}"); // DEBUG-TEMP
     let app_menu = NSMenu::new(mtm);
-    debug_log::log("install_app_menu", "NSMenuItem::new app_title", "{}"); // DEBUG-TEMP
     let app_title = NSMenuItem::new(mtm);
-    debug_log::log("install_app_menu", "setTitle app_title", "{}"); // DEBUG-TEMP
     app_title.setTitle(&NSString::from_str("litecast"));
     // NOTE: `app_title` is the menu-BAR item; it must NOT be added into `app_menu`.
     // Adding it here AND then calling `app_title.setSubmenu(app_menu)` below created
     // a cycle (app_menu contains app_title whose submenu is app_menu), which made
     // AppKit's setSubmenu hang forever on the main thread, freezing the run loop.
 
-    debug_log::log("install_app_menu", "menu_item About", "{}"); // DEBUG-TEMP
     let about = menu_item(mtm, "About litecast", Some(sel!(showAbout:)), target);
     app_menu.addItem(&about);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -59,14 +45,10 @@ fn install_app_menu(mtm: MainThreadMarker, target: &AnyObject) {
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     let quit = menu_item(mtm, "Quit litecast", Some(sel!(quitApp:)), target);
-    debug_log::log("install_app_menu", "quit setKeyEquivalent", "{}"); // DEBUG-TEMP
     quit.setKeyEquivalent(&NSString::from_str("q"));
-    debug_log::log("install_app_menu", "quit addItem", "{}"); // DEBUG-TEMP
     app_menu.addItem(&quit);
 
-    debug_log::log("install_app_menu", "setSubmenu", "{}"); // DEBUG-TEMP
     app_title.setSubmenu(Some(&app_menu));
-    debug_log::log("install_app_menu", "bar addItem app_title", "{}"); // DEBUG-TEMP
     bar.addItem(&app_title);
 
     // Standard Edit menu. Without it, macOS never routes ⌘A/⌘C/⌘V/⌘X/⌘Z to the
@@ -90,9 +72,7 @@ fn install_app_menu(mtm: MainThreadMarker, target: &AnyObject) {
     edit_item.setSubmenu(Some(&edit_menu));
     bar.addItem(&edit_item);
 
-    debug_log::log("install_app_menu", "setMainMenu", "{}"); // DEBUG-TEMP
     app.setMainMenu(Some(&bar));
-    debug_log::log("install_app_menu", "setMainMenu done", "{}"); // DEBUG-TEMP
 }
 
 /// Edit-menu item with a ⌘<key> equivalent and target = nil (first responder).
@@ -136,11 +116,6 @@ fn status_item_icon() -> Option<Retained<NSImage>> {
         Some(&NSString::from_str("litecast")),
         Some(&NSString::from_str("icns")),
     )?;
-    debug_log::log(
-        "status_item_icon",
-        "bundle resource",
-        &format!(r#"{{"path":{:?}}}"#, path.to_string()),
-    );
     let img = NSImage::initWithContentsOfFile(NSImage::alloc(), &path)?;
     // Menu-bar extra size (24pt; AppKit picks @2x from the icns).
     img.setSize(NSSize::new(24.0, 24.0));
@@ -148,7 +123,6 @@ fn status_item_icon() -> Option<Retained<NSImage>> {
 }
 
 fn install_status_item(mtm: MainThreadMarker, target: &AnyObject) {
-    debug_log::log("install_status_item", "systemStatusBar", "{}"); // DEBUG-TEMP
     let status_bar = NSStatusBar::systemStatusBar();
     let icon = status_item_icon();
     let length = if icon.is_some() {
@@ -156,19 +130,9 @@ fn install_status_item(mtm: MainThreadMarker, target: &AnyObject) {
     } else {
         NSVariableStatusItemLength
     };
-    debug_log::log("install_status_item", "statusItemWithLength", "{}"); // DEBUG-TEMP
     let item = status_bar.statusItemWithLength(length);
     // Always show; do not use autosaveName — it can restore a user-hidden state.
     item.setVisible(true);
-    debug_log::log(
-        "install_status_item",
-        "created",
-        &format!(
-            r#"{{"has_icon":{},"visible":{}}}"#,
-            icon.is_some(),
-            item.isVisible()
-        ),
-    );
     if let Some(button) = item.button(mtm) {
         if let Some(ref icon) = icon {
             button.setImage(Some(icon));
@@ -211,17 +175,12 @@ fn menu_item(
     action: Option<objc2::runtime::Sel>,
     target: &AnyObject,
 ) -> Retained<NSMenuItem> {
-    debug_log::log("menu_item", "new", &format!(r#"{{"title":"{title}"}}"#)); // DEBUG-TEMP
     let item = NSMenuItem::new(mtm);
-    debug_log::log("menu_item", "setTitle", &format!(r#"{{"title":"{title}"}}"#)); // DEBUG-TEMP
     item.setTitle(&NSString::from_str(title));
     if let Some(action) = action {
         unsafe {
-            debug_log::log("menu_item", "setAction", &format!(r#"{{"title":"{title}"}}"#)); // DEBUG-TEMP
             item.setAction(Some(action));
-            debug_log::log("menu_item", "setTarget", &format!(r#"{{"title":"{title}"}}"#)); // DEBUG-TEMP
             item.setTarget(Some(target));
-            debug_log::log("menu_item", "set done", &format!(r#"{{"title":"{title}"}}"#)); // DEBUG-TEMP
         }
     }
     item

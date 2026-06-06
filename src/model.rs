@@ -177,6 +177,19 @@ impl Item {
 }
 
 impl Action {
+    /// When `confirm` is true, wrap `RunShell` in a two-step confirm flow.
+    pub fn wrap_shell_confirm(self, label: impl Into<String>, confirm: bool) -> Self {
+        if confirm {
+            if let Action::RunShell(cmd) = self {
+                return Action::Confirm {
+                    label: label.into(),
+                    inner: Box::new(Action::RunShell(cmd)),
+                };
+            }
+        }
+        self
+    }
+
     /// Execute the action. Returns true if the panel should close afterwards.
     pub fn execute(&self) -> bool {
         match self {

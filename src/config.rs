@@ -152,6 +152,11 @@ keep_images = true
 max_images = 20
 skip_secrets = true
 
+# Optional security hardening. confirm_config_shell wraps [[commands]] and hotkey
+# shell actions in a two-step confirm (like plugin shell and process kill).
+[security]
+confirm_config_shell = false
+
 # Window management. This is the ONE litecast feature that needs the macOS
 # Accessibility permission, so it is OFF by default. Set enabled = true to show
 # window commands (type "win", or search e.g. "Maximize Window"). The first time
@@ -242,6 +247,7 @@ pub struct Config {
     pub pomodoro: PomodoroConfig,
     pub color: ColorConfig,
     pub menu: MenuConfig,
+    pub security: SecurityConfig,
 }
 
 impl Default for Config {
@@ -268,6 +274,23 @@ impl Default for Config {
             pomodoro: PomodoroConfig::default(),
             color: ColorConfig::default(),
             menu: MenuConfig::default(),
+            security: SecurityConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// When true, config `kind = "shell"` commands and hotkey shell actions
+    /// require confirmation before running.
+    pub confirm_config_shell: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            confirm_config_shell: false,
         }
     }
 }

@@ -21,7 +21,8 @@ If you did not author these files, do not run litecast with them unchanged.
 ## What litecast can do
 
 - **Shell**: config `kind = "shell"`, hotkeys, and plugin `shell` actions run
-  commands via `/bin/sh -c` (plugin shell actions require confirmation).
+  commands via `/bin/sh -c` (plugin shell and optional config shell actions
+  require confirmation when enabled).
 - **Automation**: `@`-commands and notes can drive Terminal, Finder, and Apple
   Notes via AppleScript (user arguments are passed as argv, not interpolated
   into script source).
@@ -66,7 +67,20 @@ Plugin actions with `"action": "shell"` are wrapped in a two-step confirm flow
 ### URL scheme filtering
 
 `@safari` and `Action::Open` block dangerous schemes (`javascript:`, `data:`,
-etc.); only `http://` and `https://` URL opens are allowed.
+`file://`, etc.); only `http://` and `https://` URL opens are allowed. Paths
+without a scheme (files, apps) are passed through to `/usr/bin/open` as before.
+
+### argv-only file and process actions
+
+Finder reveal (`reveal`), Quick Look (`ql`), and process kill use `Action::Run`
+with explicit argv (no `/bin/sh -c`), so user-supplied paths and PIDs cannot
+inject shell metacharacters.
+
+### Optional config shell confirmation
+
+Set `[security] confirm_config_shell = true` (or enable in Settings → General)
+to wrap `kind = "shell"` [[commands]] entries and hotkey shell actions in a
+two-step confirm flow, matching plugin shell and process kill.
 
 ### Clipboard secrets
 

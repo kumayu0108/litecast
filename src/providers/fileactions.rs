@@ -36,13 +36,19 @@ impl Provider for FileActionsProvider {
                 out,
                 &arg,
                 "Reveal in Finder",
-                |p| Action::RunShell(format!("open -R {}", shell_quote(p))),
+                |p| Action::Run {
+                    program: "/usr/bin/open".to_string(),
+                    args: vec!["-R".to_string(), p.to_string()],
+                },
             ),
             "ql" | "quicklook" | "preview" if !arg.is_empty() => push_path_action(
                 out,
                 &arg,
                 "Quick Look preview",
-                |p| Action::RunShell(format!("qlmanage -p {} >/dev/null 2>&1", shell_quote(p))),
+                |p| Action::Run {
+                    program: "/usr/bin/qlmanage".to_string(),
+                    args: vec!["-p".to_string(), p.to_string()],
+                },
             ),
             "copypath" | "cppath" if !arg.is_empty() => {
                 let expanded = expand_tilde(&arg);
@@ -188,6 +194,3 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
