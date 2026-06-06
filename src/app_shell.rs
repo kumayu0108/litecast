@@ -142,8 +142,8 @@ fn status_item_icon() -> Option<Retained<NSImage>> {
         &format!(r#"{{"path":{:?}}}"#, path.to_string()),
     );
     let img = NSImage::initWithContentsOfFile(NSImage::alloc(), &path)?;
-    // Standard menu-bar extra size (18pt; AppKit picks @2x from the icns).
-    img.setSize(NSSize::new(18.0, 18.0));
+    // Menu-bar extra size (24pt; AppKit picks @2x from the icns).
+    img.setSize(NSSize::new(24.0, 24.0));
     Some(img)
 }
 

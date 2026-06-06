@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::config::AiConfig;
 use crate::secrets;
+use crate::security::url::validate_ai_endpoint;
 
 /// One turn in a conversation.
 #[derive(Clone, Debug)]
@@ -56,12 +57,11 @@ pub fn ask_chat(
         return Err("No prompt to send".to_string());
     }
 
-    if image_b64.is_some() && config.provider == "ollama" {
-        return Err(
-            "Vision is not supported for the configured Ollama model. Use a vision-capable model or remove the screenshot."
-                .to_string(),
-        );
-    }
+    validate_ai_endpoint(
+        &config.provider,
+        &config.endpoint,
+        config.allow_private_endpoint,
+    )?;
 
     match config.provider.as_str() {
         "anthropic" => {
@@ -74,7 +74,7 @@ pub fn ask_chat(
                 .ok_or_else(|| format!("No API key set for {}", config.provider))?;
             ask_openai(config, Some(key.as_str()), history, image_b64.as_deref())
         }
-        "ollama" => ask_ollama(config, history),
+        "ollama" => ask_ollama(config, history, image_b64.as_deref()),
         "gemini" | "google" => {
             let key = secrets::api_key_for_chat(&config.provider, &config.endpoint)
                 .ok_or_else(|| format!("No API key set for {}", config.provider))?;
@@ -86,6 +86,7 @@ pub fn ask_chat(
 
 /// List installed Ollama models from `GET /api/tags`.
 pub fn list_ollama_models(endpoint: &str) -> Result<Vec<String>, String> {
+    validate_ai_endpoint("ollama", endpoint, false)?;
     let base = ollama_base(endpoint);
     let url = format!("{base}/api/tags");
     let mut resp = ureq::get(&url)
@@ -232,7 +233,11 @@ fn ensure_ollama_running(base: &str) -> Result<(), String> {
     Err("Couldn't start Ollama (server did not become ready)".to_string())
 }
 
-fn ask_ollama(config: &AiConfig, history: &[ChatMsg]) -> Result<String, String> {
+fn ask_ollama(
+    config: &AiConfig,
+    history: &[ChatMsg],
+    image_b64: Option<&str>,
+) -> Result<String, String> {
     let mut cfg = config.clone();
     // Make sure the local server is up before we list models or send the
     // request. This runs on the AI worker thread (see ask_chat callers), never
@@ -248,7 +253,7 @@ fn ask_ollama(config: &AiConfig, history: &[ChatMsg]) -> Result<String, String> 
     if cfg.endpoint.is_empty() {
         cfg.endpoint = ollama_base("");
     }
-    ask_openai(&cfg, None, history, None)
+    ask_openai(&cfg, None, history, image_b64)
 }
 
 fn ask_anthropic(
